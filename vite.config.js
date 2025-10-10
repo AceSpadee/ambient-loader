@@ -4,13 +4,14 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: true,   // allow LAN access
-    port: 5173,
-    open: true,
+    host: true,
+    port: Number(process.env.PORT) || 5173, // local dev
+    open: false,
+    allowedHosts: true 
   },
   preview: {
     host: true,
-    port: 4173,
-    allowedHosts: true,
+    port: Number(process.env.PORT) || 4173, // Render will set $PORT
+    allowedHosts: true
   }
 });
