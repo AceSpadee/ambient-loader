@@ -10,7 +10,7 @@ export function spawnObstacle(state, canvas){
 
   const spawnX = w + 40;          // where new obstacles are born
   const speed  = Math.max(120, state.speed);
-  const MARGIN = 40;              // small visual safety pad (px)
+  const MARGIN = 160;              // small visual safety pad (px)
 
   // --- guard 1: if any existing WIRE still spans spawnX, wait until its right pole clears
   {
