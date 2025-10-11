@@ -146,8 +146,18 @@ export default function RooftopCat() {
       input.jumpBufferT = JUMP_BUFFER;
       if (!state.firstJumpDone) { state.firstJumpDone = true; localStorage.setItem("rc.hintDone","1"); }
     }
+
     function onKeyDown(e){
-      if(e.repeat) return; const k=e.key.toLowerCase();
+      if(e.repeat) return;
+      const k=e.key.toLowerCase();
+
+      // NEW: resume from pause on ANY key press
+      if (gameStateRef.current === "paused") {
+        e.preventDefault();
+        setGameState("playing");
+        return; // don't also treat this press as jump/duck/etc.
+      }
+
       if(k===" "||k==="arrowup"||k==="w"){ e.preventDefault(); handleStartOrJump(); input.jumpHeld = true; }
       if(k==="arrowdown"||k==="s") input.duck=true;
       if(k==="p") setGameState(s => s==="paused" ? "playing" : (s==="playing" ? "paused" : s));
@@ -164,13 +174,30 @@ export default function RooftopCat() {
         setWeather(next);
       }
     }
+
     function onKeyUp(e){
       const k=e.key.toLowerCase();
       if(k===" "||k==="arrowup"||k==="w"){ input.jumpHeld = false; if (player.vy < 0) player.vy *= 0.75; }
       if(k==="arrowdown"||k==="s") input.duck=false;
     }
-    function onPointerDown(e){ e.preventDefault(); input.tapDownAt=performance.now(); }
-    function onPointerUp(e){ e.preventDefault(); const held=performance.now()-input.tapDownAt; if(held<160) handleStartOrJump(); else input.duck=false; input.tapDownAt=0; }
+
+    // Resume on click/tap while paused (pointerdown on the canvas)
+    function onPointerDown(e){
+      e.preventDefault();
+      if (gameStateRef.current === "paused") {
+        setGameState("playing");
+        input.tapDownAt = 0;
+        input.duck = false;
+        return;
+      }
+      input.tapDownAt = performance.now();
+    }
+    function onPointerUp(e){
+      e.preventDefault();
+      const held = performance.now() - input.tapDownAt;
+      if(held < 160) handleStartOrJump(); else input.duck=false;
+      input.tapDownAt=0;
+    }
     function onPointerCancel(){ input.duck=false; input.tapDownAt=0; }
     function onBlur(){ if(gameStateRef.current==="playing"){ setGameState("paused"); } }
 
@@ -192,65 +219,87 @@ export default function RooftopCat() {
     }
 
     function update(dt){
-      state.t+=dt; const rm=reduceMotionRef.current?0.5:1;
-      state.speed=Math.min(state.speedMax,state.speed+state.speedRamp*rm*dt);
+      state.t += dt;
+      const rm = reduceMotionRef.current ? 0.5 : 1;
+      state.speed = Math.min(state.speedMax, state.speed + state.speedRamp * rm * dt);
 
       // variable jump
-      input.jumpBufferT=Math.max(0,input.jumpBufferT-dt); input.coyoteT=Math.max(0,input.coyoteT-dt);
-      if(input.jumpBufferT>0&&(player.onGround||input.coyoteT>0)){
-        player.vy=state.jumpVel; player.onGround=false; input.jumpBufferT=0;
+      input.jumpBufferT = Math.max(0, input.jumpBufferT - dt);
+      input.coyoteT     = Math.max(0, input.coyoteT - dt);
+      if (input.jumpBufferT > 0 && (player.onGround || input.coyoteT > 0)) {
+        player.vy = state.jumpVel; player.onGround = false; input.jumpBufferT = 0;
         input.jumpHoldT = 0;
       }
       let g = state.gravity;
       if (player.vy < 0) {
-        if (input.jumpHeld && input.jumpHoldT < MAX_HOLD) { g *= 0.55; input.jumpHoldT += dt; }
+        if (input.jumpHeld && input.jumpHoldT < MAX_HOLD) { g *= HOLD_GRAVITY_FACTOR; input.jumpHoldT += dt; }
         else if (!input.jumpHeld) { g *= CUT_GRAVITY_FACTOR; }
       }
-      player.vy += g*dt;
+      player.vy += g * dt;
 
       // ground
-      const targetH=input.duck?player.duckH:player.h;
-      player.y+=player.vy*dt;
-      if(player.y+targetH>=state.groundY){
-        player.y=state.groundY-targetH;
-        if(!player.onGround){
-          spawnPuffs(state, player.x+player.w*0.6, state.groundY+state.deckH-6, Math.min(10 + Math.abs(player.vy)*0.01, 18), reduceMotionRef.current);
-          input.coyoteT=COYOTE;
+      const targetH = input.duck ? player.duckH : player.h;
+      player.y += player.vy * dt;
+      if (player.y + targetH >= state.groundY) {
+        player.y = state.groundY - targetH;
+        if (!player.onGround) {
+          spawnPuffs(state, player.x + player.w * 0.6, state.groundY + state.deckH - 6, Math.min(10 + Math.abs(player.vy) * 0.01, 18), reduceMotionRef.current);
+          input.coyoteT = COYOTE;
         }
-        player.onGround=true; player.vy=0; input.jumpHoldT = 0;
-      } else { player.onGround=false; }
+        player.onGround = true; player.vy = 0; input.jumpHoldT = 0;
+      } else {
+        player.onGround = false;
+      }
 
-      player.earFlickT -= dt; if (player.earFlickT <= 0) player.earFlickT = 3 + Math.random()*6;
+      player.earFlickT -= dt; if (player.earFlickT <= 0) player.earFlickT = 3 + Math.random() * 6;
 
       const dpr = (window.devicePixelRatio || 1);
-      const w=canvas.width/dpr, h=canvas.height/dpr;
+      const w = canvas.width / dpr, h = canvas.height / dpr;
 
       // parallax move
-      moveBuildings(state.backTall, state.speed*0.24, dt, w);
-      moveBuildings(state.frontTall, state.speed*0.9, dt, w);
-      moveBuildings(state.backSmallBottom, state.speed*0.18, dt, w);
-      moveBuildings(state.frontSmallBottom, state.speed*0.6, dt, w);
+      moveBuildings(state.backTall,         state.speed * 0.24, dt, w);
+      moveBuildings(state.frontTall,        state.speed * 0.90, dt, w);
+      moveBuildings(state.backSmallBottom,  state.speed * 0.18, dt, w);
+      moveBuildings(state.frontSmallBottom, state.speed * 0.60, dt, w);
 
       emitSteam(state, dt);
-      twinkleWindows(state.backTall); twinkleWindows(state.frontTall);
+      twinkleWindows(state.backTall);
+      twinkleWindows(state.frontTall);
 
-      state.clouds.forEach(cl=>{ cl.x-=cl.v*dt; if(cl.x<-220){ cl.x=w+80; cl.y=40+Math.random()*120; cl.v=12+Math.random()*18; cl.s=0.8+Math.random()*1.6; }});
+      state.clouds.forEach(cl => {
+        cl.x -= cl.v * dt;
+        if (cl.x < -220) { cl.x = w + 80; cl.y = 40 + Math.random() * 120; cl.v = 12 + Math.random() * 18; cl.s = 0.8 + Math.random() * 1.6; }
+      });
 
       // weather particles
       if (state.rain.length){
-        for (const r of state.rain) { r.x += r.vx*dt; r.y += r.vy*dt; if (r.y > h+20) { r.y = -10; r.x = (Math.random()*w); } if (r.x < -20) { r.x = w + 10; } }
+        for (const r of state.rain) {
+          r.x += r.vx * dt; r.y += r.vy * dt;
+          if (r.y > h + 20) { r.y = -10; r.x = (Math.random() * w); }
+          if (r.x < -20) { r.x = w + 10; }
+        }
       }
       if (state.snow.length){
-        for (const s of state.snow){ s.sway += s.swaySpeed*dt; s.x += s.vx*dt + Math.sin(s.sway)*6*dt; s.y += s.vy*dt; if (s.y > h+10) { s.y = -10; s.x = Math.random()*w; } if (s.x < -15) s.x = w + 10; }
+        for (const s of state.snow){
+          s.sway += s.swaySpeed * dt;
+          s.x += s.vx * dt + Math.sin(s.sway) * 6 * dt;
+          s.y += s.vy * dt;
+          if (s.y > h + 10) { s.y = -10; s.x = Math.random() * w; }
+          if (s.x < -15) s.x = w + 10;
+        }
       }
       if (state.fog.length){
         for (const f of state.fog){
-          f.x += f.vx*dt; f.y += Math.sin(state.t * f.swaySpeed + f.phi) * 4 * dt;
-          if (f.x + f.r < -80) { f.x = w + 60; f.y = (state.groundY - 170) + Math.random()*(state.groundY + 36 - (state.groundY - 170)); }
+          f.x += f.vx * dt;
+          f.y += Math.sin(state.t * f.swaySpeed + f.phi) * 4 * dt;
+          if (f.x + f.r < -80) {
+            f.x = w + 60;
+            f.y = (state.groundY - 170) + Math.random() * (state.groundY + 36 - (state.groundY - 170));
+          }
         }
       }
 
-      // ---------- fair spawn context (updated every frame) ----------
+      // fair spawn context
       state.playerCtx = {
         x: player.x,
         y: player.y,
@@ -267,32 +316,62 @@ export default function RooftopCat() {
       };
 
       // obstacles
-      state.spawnTimer-=dt;
-      if(state.spawnTimer<=0){
-        // Let obstacles.js decide the next fair delay (so it can avoid impossible combos).
+      state.spawnTimer -= dt;
+      if (state.spawnTimer <= 0) {
         const nextDelay = spawnObstacle(state, canvas);
         if (typeof nextDelay === "number" && Number.isFinite(nextDelay)) {
           state.spawnTimer = nextDelay;
         } else {
-          // Fallback (in case older obstacles.js is loaded)
-          const base=1.08;
-          const speedFactor=1-(state.speed-state.baseSpeed)/(state.speedMax-state.baseSpeed+1e-6);
-          state.spawnTimer=base*(0.55+speedFactor*0.8)*(0.8+Math.random()*0.6);
+          const base = 1.08;
+          const speedFactor = 1 - (state.speed - state.baseSpeed) / (state.speedMax - state.baseSpeed + 1e-6);
+          state.spawnTimer = base * (0.55 + speedFactor * 0.8) * (0.8 + Math.random() * 0.6);
         }
       }
-      for(const o of state.obstacles) o.x-=state.speed*dt;
-      while(state.obstacles.length&&state.obstacles[0].x+state.obstacles[0].w<-80) state.obstacles.shift();
+      for (const o of state.obstacles) o.x -= state.speed * dt;
+      while (state.obstacles.length && state.obstacles[0].x + state.obstacles[0].w < -80) state.obstacles.shift();
 
-      // collisions
-      const px=player.x, py=player.y, pw=player.w, ph=input.duck?player.duckH:player.h;
-      for(const o of state.obstacles){
-        if(overlap(px+2,py+2,pw-4,ph-4,o.x,o.y,o.w,o.h)){
+      // ---------- collisions (supports multi-rect colliders) ----------
+      const px = player.x, py = player.y, pw = player.w, ph = input.duck ? player.duckH : player.h;
+      const prx = px + 2, pry = py + 2, prw = pw - 4, prh = ph - 4;
+
+      // fallback builder if a water_tower_gate didn't attach colliders()
+      const buildWTGColliders = (o) => {
+        const inset = Math.max(10, o.w * 0.18);
+        const legW  = Math.max(4, Math.min(7, o.w * 0.08));
+        const innerL = o.x + inset + legW + 2;
+        const innerR = o.x + o.w - inset - legW - 2;
+        const barW   = Math.max(20, innerR - innerL);
+        const duckBar = { x: innerL, y: o.y, w: barW, h: o.h };
+
+        const legH      = o.clearance + o.h + o.stem;
+        const platformY = o.baseY - legH;
+        const tankPad   = 6;
+        const tankTopY  = platformY - tankPad - o.tankH;
+        const capExtra  = 12;
+        const towerTopY = tankTopY - capExtra;
+        const towerH    = o.y - towerTopY;
+
+        const tower = { x: o.x, y: towerTopY, w: o.w, h: Math.max(0, towerH) };
+        return [duckBar, tower];
+      };
+
+      for (const o of state.obstacles){
+        const rects = (typeof o.colliders === "function")
+          ? o.colliders()
+          : (o.type === "water_tower_gate"
+              ? buildWTGColliders(o)
+              : [{ x: o.x, y: o.y, w: o.w, h: o.h }]);
+
+        let hit = false;
+        for (const r of rects){
+          if (overlap(prx, pry, prw, prh, r.x, r.y, r.w, r.h)) { hit = true; break; }
+        }
+
+        if (hit){
           state.shakeAmp = reduceMotionRef.current ? 3 : 6;
           state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
           setGameState("dead");
-          const final=Math.floor(state.score);
-
-          // best-score: functional update to avoid stale closure
+          const final = Math.floor(state.score);
           setBest(prev => {
             if (final > prev) {
               localStorage.setItem("rc.best", String(final));
@@ -300,7 +379,6 @@ export default function RooftopCat() {
             }
             return prev;
           });
-
           break;
         }
       }
@@ -308,10 +386,10 @@ export default function RooftopCat() {
       updatePuffs(state, dt);
       updateSteam(state, dt);
 
-      state.score+=dt*(state.speed*0.02);
-      const s=Math.floor(state.score); if(s!==score) setScore(s);
+      state.score += dt * (state.speed * 0.02);
+      const s = Math.floor(state.score); if (s !== score) setScore(s);
 
-      if (state.firstJumpDone && state.hintAlpha>0) state.hintAlpha=Math.max(0, state.hintAlpha - dt*0.8);
+      if (state.firstJumpDone && state.hintAlpha > 0) state.hintAlpha = Math.max(0, state.hintAlpha - dt * 0.8);
       state.hitFxT = Math.max(0, state.hitFxT - dt);
     }
 
@@ -474,7 +552,8 @@ export default function RooftopCat() {
       if (gameStateRef.current === "paused"){
         state.pausedOverlayAlpha = Math.min(0.75, state.pausedOverlayAlpha + 0.08);
         ctx.save(); ctx.globalAlpha = state.pausedOverlayAlpha; ctx.fillStyle = "#060913cc"; ctx.fillRect(0,0,w,h); ctx.globalAlpha = 1;
-        centerText(ctx, w, h, "Paused\nPress P to resume", 20); ctx.restore();
+        centerText(ctx, w, h, "Paused\nPress any key or Click to resume", 20);
+        ctx.restore();
       } else {
         state.pausedOverlayAlpha = 0;
       }
@@ -501,6 +580,11 @@ export default function RooftopCat() {
   function handleReset(){ window.location.reload(); }
   const prettyWeather = (w) => w[0].toUpperCase()+w.slice(1);
 
+  // Direct Pause/Resume toggle (mirrors the P key)
+  const handlePauseToggle = () => {
+    setGameState(s => (s === "paused" ? "playing" : (s === "playing" ? "paused" : s)));
+  };
+
   return (
     <div style={wrap}>
       <canvas ref={canvasRef} style={{ display: "block" }} />
@@ -509,7 +593,11 @@ export default function RooftopCat() {
         <button title="Cycle weather (R)" style={chip} onClick={()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'r'}))}>
           Weather: {prettyWeather(typeof window !== "undefined" ? (localStorage.getItem("rc.weather")||"none") : "none")} (R)
         </button>
-        <button title="Pause/Resume (P)" style={chip} onClick={()=>window.dispatchEvent(new KeyboardEvent('keydown',{key:'p'}))}>Pause: P</button>
+
+        {/* Pause/Resume button (doesn't synthesize keypress; toggles directly) */}
+        <button title="Pause/Resume (P)" style={chip} onClick={handlePauseToggle}>
+          {gameState === "paused" ? "Resume: Click/P" : "Pause: P"}
+        </button>
 
         <label style={toggleLabel}>
           <input type="checkbox" checked={reduceMotion} onChange={(e) => setReduceMotion(e.target.checked)} /> Reduce motion
