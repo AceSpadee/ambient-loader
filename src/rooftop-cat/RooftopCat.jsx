@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { PALETTE } from "./palette.js";
 import { clamp, lerpColor, hsl, centerText, overlap, roundRect } from "./utils.js";
 import { makeScenery, drawCloud, drawBuilding, drawSilhouette } from "./scenery.js";
-import { initWeather } from "./weather.js";
+import { initWeather, advanceLightning, renderLightning } from "./weather.js";
 import { emitSteam, updateSteam, spawnPuffs, updatePuffs } from "./effects.js";
 import { spawnObstacle, drawObstacles } from "./obstacles.js";
 import { drawCat } from "./player.js";
@@ -51,8 +51,8 @@ export default function RooftopCat() {
       last: performance.now(),
       speed: 340,
       baseSpeed: 340,
-      speedMax: 780,
-      speedRamp: 32,
+      speedMax: 1200,
+      speedRamp: 36,
       gravity: 2400,
       jumpVel: -900,
       deckH: 18,
@@ -167,7 +167,7 @@ export default function RooftopCat() {
         setCycleMode(order[(idx+1)%order.length]);
       }
       if(k==="r"){
-        const order = ["none","rain","snow","fog"];
+        const order = ["none","rain","snow","fog","storm"];
         const idx = order.indexOf(weatherRef.current);
         const next = order[(idx+1)%order.length];
         initWeather(next, state, canvas, reduceMotionRef.current);
@@ -219,44 +219,81 @@ export default function RooftopCat() {
     }
 
     function update(dt){
+      // Elapsed world time (seconds since run start)
       state.t += dt;
-      const rm = reduceMotionRef.current ? 0.5 : 1;
-      state.speed = Math.min(state.speedMax, state.speed + state.speedRamp * rm * dt);
 
-      // variable jump
+      // --- SPEED / DIFFICULTY RAMP ------------------------------------------------
+      // Current horizontal “world” speed increases toward speedMax by speedRamp/sec.
+      // 🔧 To change the *acceleration*, edit `state.speedRamp` (defined in state init).
+      // 🔧 To change the *top speed*, edit `state.speedMax` (state init).
+      // 🔧 To change the *starting speed*, set `state.baseSpeed` and initial `state.speed` in resetRun().
+      const rm = reduceMotionRef.current ? 0.5 : 1; // halve ramp in reduce-motion
+      state.speed = Math.min(state.speedMax,
+        state.speed + state.speedRamp * rm * dt
+      );
+
+      // --- VARIABLE JUMP ----------------------------------------------------------
+      // We keep a small “buffer” so pressing jump just before landing still works,
+      // and a small “coyote” time to allow jumping shortly after leaving a ledge.
       input.jumpBufferT = Math.max(0, input.jumpBufferT - dt);
       input.coyoteT     = Math.max(0, input.coyoteT - dt);
-      if (input.jumpBufferT > 0 && (player.onGround || input.coyoteT > 0)) {
-        player.vy = state.jumpVel; player.onGround = false; input.jumpBufferT = 0;
-        input.jumpHoldT = 0;
-      }
-      let g = state.gravity;
-      if (player.vy < 0) {
-        if (input.jumpHeld && input.jumpHoldT < MAX_HOLD) { g *= HOLD_GRAVITY_FACTOR; input.jumpHoldT += dt; }
-        else if (!input.jumpHeld) { g *= CUT_GRAVITY_FACTOR; }
-      }
-      player.vy += g * dt;
 
-      // ground
+      // Start a jump if you buffered and are grounded (or in coyote)
+      if (input.jumpBufferT > 0 && (player.onGround || input.coyoteT > 0)) {
+        player.vy = state.jumpVel;     // initial upward velocity
+        player.onGround = false;
+        input.jumpBufferT = 0;         // consume the buffer
+        input.jumpHoldT = 0;           // reset “held jump” timer
+      }
+
+      // Gravity shaping: holding jump reduces gravity up to MAX_HOLD → higher jump.
+      // Releasing jump early increases gravity → short hop.
+      let g = state.gravity;
+      if (player.vy < 0) { // only while moving upward
+        if (input.jumpHeld && input.jumpHoldT < MAX_HOLD) {
+          g *= HOLD_GRAVITY_FACTOR;    // 🔧 change “floatiness” while holding jump
+          input.jumpHoldT += dt;
+        } else if (!input.jumpHeld) {
+          g *= CUT_GRAVITY_FACTOR;     // 🔧 change how “snappy” short hops feel
+        }
+      }
+      player.vy += g * dt;             // integrate gravity
+
+      // --- GROUND / DUCK COLLISION -----------------------------------------------
+      // Ducking lowers the player’s collision box.
       const targetH = input.duck ? player.duckH : player.h;
       player.y += player.vy * dt;
+
       if (player.y + targetH >= state.groundY) {
+        // Landed: snap to the ground and trigger a little impact puff
         player.y = state.groundY - targetH;
         if (!player.onGround) {
-          spawnPuffs(state, player.x + player.w * 0.6, state.groundY + state.deckH - 6, Math.min(10 + Math.abs(player.vy) * 0.01, 18), reduceMotionRef.current);
-          input.coyoteT = COYOTE;
+          spawnPuffs(
+            state,
+            player.x + player.w * 0.6,
+            state.groundY + state.deckH - 6,
+            Math.min(10 + Math.abs(player.vy) * 0.01, 18),
+            reduceMotionRef.current
+          );
+          input.coyoteT = COYOTE;      // refresh coyote after landing
         }
-        player.onGround = true; player.vy = 0; input.jumpHoldT = 0;
+        player.onGround = true;
+        player.vy = 0;
+        input.jumpHoldT = 0;
       } else {
         player.onGround = false;
       }
 
-      player.earFlickT -= dt; if (player.earFlickT <= 0) player.earFlickT = 3 + Math.random() * 6;
+      // Tiny animation flavor for the cat
+      player.earFlickT -= dt;
+      if (player.earFlickT <= 0) player.earFlickT = 3 + Math.random() * 6;
 
+      // Canvas-space helpers (logical pixels)
       const dpr = (window.devicePixelRatio || 1);
       const w = canvas.width / dpr, h = canvas.height / dpr;
 
-      // parallax move
+      // --- PARALLAX / AMBIENCE ----------------------------------------------------
+      // Parallax speeds are % of world speed. Changing these alters the sense of depth.
       moveBuildings(state.backTall,         state.speed * 0.24, dt, w);
       moveBuildings(state.frontTall,        state.speed * 0.90, dt, w);
       moveBuildings(state.backSmallBottom,  state.speed * 0.18, dt, w);
@@ -266,17 +303,24 @@ export default function RooftopCat() {
       twinkleWindows(state.backTall);
       twinkleWindows(state.frontTall);
 
+      // Clouds drift left and recycle offscreen
       state.clouds.forEach(cl => {
         cl.x -= cl.v * dt;
-        if (cl.x < -220) { cl.x = w + 80; cl.y = 40 + Math.random() * 120; cl.v = 12 + Math.random() * 18; cl.s = 0.8 + Math.random() * 1.6; }
+        if (cl.x < -220) {
+          cl.x = w + 80;
+          cl.y = 40 + Math.random() * 120;
+          cl.v = 12 + Math.random() * 18;
+          cl.s = 0.8 + Math.random() * 1.6;
+        }
       });
 
-      // weather particles
+      // --- WEATHER PARTICLES ------------------------------------------------------
+      // 🔧 Rain/snow speeds live in weather init; tweak there for “heavier” storms.
       if (state.rain.length){
         for (const r of state.rain) {
           r.x += r.vx * dt; r.y += r.vy * dt;
           if (r.y > h + 20) { r.y = -10; r.x = (Math.random() * w); }
-          if (r.x < -20) { r.x = w + 10; }
+          if (r.x < -20)    { r.x = w + 10; }
         }
       }
       if (state.snow.length){
@@ -285,7 +329,7 @@ export default function RooftopCat() {
           s.x += s.vx * dt + Math.sin(s.sway) * 6 * dt;
           s.y += s.vy * dt;
           if (s.y > h + 10) { s.y = -10; s.x = Math.random() * w; }
-          if (s.x < -15) s.x = w + 10;
+          if (s.x < -15)    s.x = w + 10;
         }
       }
       if (state.fog.length){
@@ -299,7 +343,12 @@ export default function RooftopCat() {
         }
       }
 
-      // fair spawn context
+      // Lightning timers/flash (no-ops unless weather === "storm")
+      // 🔧 To make strikes rarer/stronger/brighter: edit initStorm/advanceLightning/renderLightning in weather.js
+      advanceLightning(state, dt, canvas);
+
+      // --- FAIR-SPAWN CONTEXT -----------------------------------------------------
+      // Helpful info for the spawner to make decisions.
       state.playerCtx = {
         x: player.x,
         y: player.y,
@@ -315,26 +364,46 @@ export default function RooftopCat() {
         canvasH: h,
       };
 
-      // obstacles
+      // --- OBSTACLES: WHEN TO SPAWN ----------------------------------------------
       state.spawnTimer -= dt;
       if (state.spawnTimer <= 0) {
+        // The spawner may return an explicit delay (e.g., to avoid overlapping wires).
         const nextDelay = spawnObstacle(state, canvas);
         if (typeof nextDelay === "number" && Number.isFinite(nextDelay)) {
-          state.spawnTimer = nextDelay;
+          state.spawnTimer = nextDelay;  // use the spawner’s custom timing
         } else {
-          const base = 1.08;
-          const speedFactor = 1 - (state.speed - state.baseSpeed) / (state.speedMax - state.baseSpeed + 1e-6);
-          state.spawnTimer = base * (0.55 + speedFactor * 0.8) * (0.8 + Math.random() * 0.6);
+          // Fallback cadence ties spacing to speed:
+          // - speedFactor ~ 1 at base speed → larger gaps, easier
+          // - speedFactor ~ 0 near max speed → smaller gaps, harder
+          const base = 1.08; // 🔧 overall spawn cadence multiplier (higher = fewer spawns)
+          const speedFactor = 1 - (state.speed - state.baseSpeed) /
+                                (state.speedMax - state.baseSpeed + 1e-6);
+
+          // Delay = base * (early/late scaling) * (random jitter)
+          // (0.55 + 0.8*speedFactor):
+          //   at base speed (speedFactor≈1):   ≈ 1.35  → long gaps
+          //   at max speed  (speedFactor≈0):   ≈ 0.55  → short gaps
+          // (0.8 + rand*0.6) ~ [0.8..1.4] jitter avoids a metronome feel
+          // 🔧 Make early game easier: increase 0.8 → e.g. 1.0..1.6, or raise the 0.55 baseline.
+          // 🔧 Make late game harder: lower 0.55 a bit, e.g. 0.45.
+          state.spawnTimer = base
+            * (0.55 + speedFactor * 0.8)
+            * (0.8 + Math.random() * 0.6);
         }
       }
-      for (const o of state.obstacles) o.x -= state.speed * dt;
-      while (state.obstacles.length && state.obstacles[0].x + state.obstacles[0].w < -80) state.obstacles.shift();
 
-      // ---------- collisions (supports multi-rect colliders) ----------
-      const px = player.x, py = player.y, pw = player.w, ph = input.duck ? player.duckH : player.h;
+      // --- OBSTACLES: MOVE & CULL -------------------------------------------------
+      for (const o of state.obstacles) o.x -= state.speed * dt;
+      while (state.obstacles.length && state.obstacles[0].x + state.obstacles[0].w < -80)
+        state.obstacles.shift();
+
+      // --- COLLISIONS (supports multi-rect colliders) -----------------------------
+      // Slightly inset player rect for fairness.
+      const px = player.x, py = player.y;
+      const pw = player.w, ph = input.duck ? player.duckH : player.h;
       const prx = px + 2, pry = py + 2, prw = pw - 4, prh = ph - 4;
 
-      // fallback builder if a water_tower_gate didn't attach colliders()
+      // Fallback for water_tower_gate if it forgets to attach colliders()
       const buildWTGColliders = (o) => {
         const inset = Math.max(10, o.w * 0.18);
         const legW  = Math.max(4, Math.min(7, o.w * 0.08));
@@ -368,8 +437,11 @@ export default function RooftopCat() {
         }
 
         if (hit){
+          // Camera shake + brief flash
           state.shakeAmp = reduceMotionRef.current ? 3 : 6;
           state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
+
+          // End the run, record best score
           setGameState("dead");
           const final = Math.floor(state.score);
           setBest(prev => {
@@ -383,13 +455,32 @@ export default function RooftopCat() {
         }
       }
 
+      // Particle systems after collision logic so hit flash appears this frame
       updatePuffs(state, dt);
       updateSteam(state, dt);
 
-      state.score += dt * (state.speed * 0.02);
-      const s = Math.floor(state.score); if (s !== score) setScore(s);
+      // --- SCORING (SCALES WITH SPEED) -------------------------------------------
+      // Score grows with speed; a gentle superlinear bump at high speeds feels rewarding.
+      // Base term: (dt * speed * 0.02)
+      // 🔧 To make *all* scoring faster/slower, change 0.02 globally.
+      const srScore = clamp(
+        (state.speed - state.baseSpeed) / (state.speedMax - state.baseSpeed),
+        0, 1
+      );
+      // 🔧 To make high-speed score accelerate more/less, tweak 0.85 (floor), 1.3 (gain), and exponent 1.15:
+      //    higher gain/exponent → bigger bonus near max speed.
+      const scoreMult = 0.85 + 1.3 * Math.pow(srScore, 1.15);
+      state.score += dt * state.speed * 0.02 * scoreMult;
 
-      if (state.firstJumpDone && state.hintAlpha > 0) state.hintAlpha = Math.max(0, state.hintAlpha - dt * 0.8);
+      // Push integer score to UI only when it changes
+      const s = Math.floor(state.score);
+      if (s !== score) setScore(s);
+
+      // Fade the hint once you’ve jumped
+      if (state.firstJumpDone && state.hintAlpha > 0)
+        state.hintAlpha = Math.max(0, state.hintAlpha - dt * 0.8);
+
+      // Decay the post-hit white flash
       state.hitFxT = Math.max(0, state.hitFxT - dt);
     }
 
@@ -441,6 +532,8 @@ export default function RooftopCat() {
       // stars + clouds
       const night=1-phase; if(night>0.15&&!reduceMotionRef.current){ ctx.globalAlpha=0.5*(night-0.15); ctx.fillStyle="#cfd8ff"; for(const s of state.stars){ const tw=0.5+0.5*Math.sin(state.t*2+s.p); ctx.globalAlpha=0.2+s.a*tw*(night-0.1); ctx.fillRect(s.x,s.y,1.2,1.2);} ctx.globalAlpha=1; }
       if(!reduceMotionRef.current){ for(const cl of state.clouds) drawCloud(ctx, cl.x, cl.y, cl.s, cl.a); }
+
+      renderLightning(ctx, state, canvas);
 
       // skyline silhouette
       ctx.fillStyle="#091120"; ctx.globalAlpha=0.6; for(const b of state.skyline){ ctx.beginPath(); ctx.moveTo(b.x+ (b.roof==="spike"?6:2), b.y); /* tip */ ; ctx.closePath(); }

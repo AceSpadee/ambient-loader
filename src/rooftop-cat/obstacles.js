@@ -69,11 +69,53 @@ export function spawnObstacle(state, canvas){
 
   // --- create the obstacle
   if (pick === "chimney") {
-    const bw=24+Math.random()*22, bh=34+Math.random()*40;
-    state.obstacles.push({type:"chimney",x:w+40,y:gy-bh,w:bw,h:bh});
+    // One consistent brick-stack chimney (taper + cap are handled in drawChimney)
+    const bw = 26 + Math.random() * 20;  // ~26–46 px wide
+    const bh = 44 + Math.random() * 34;  // ~44–78 px tall
+
+    state.obstacles.push({
+      type: "chimney",
+      x: spawnX,          // use your computed spawnX (w + 40)
+      y: gy - bh,
+      w: bw,
+      h: bh
+    });
   } else if (pick === "antenna") {
-    const bw=12+Math.random()*10, bh=64+Math.random()*52;
-    state.obstacles.push({type:"antenna",x:w+40,y:gy-bh,w:bw,h:bh});
+    const sr = Math.max(0, Math.min(1,
+      (state.speed - state.baseSpeed) / (state.speedMax - state.baseSpeed + 1e-6)
+    ));
+    const wantPylon = Math.random() < (0.45 + 0.25*sr);
+
+    if (!wantPylon) {
+      // classic mast
+      const bw = 12 + Math.random()*10, bh = 64 + Math.random()*52;
+      state.obstacles.push({ type:"antenna", variant:"mast", x:w+40, y:gy-bh, w:bw, h:bh });
+    } else {
+      // >>> 1.5x larger pylon <<<
+      const SCALE = 1.5;
+      const bw = (56 + Math.random()*32) * SCALE;
+      const bh = (110 + Math.random()*46) * SCALE;
+
+      const duckH = state.playerCtx ? state.playerCtx.duckH : 24;
+      const clearance = Math.max(duckH + 10, 34);
+
+      state.obstacles.push({
+        type:"antenna",
+        variant:"pylon",
+        x:w+40, y:gy-bh, w:bw, h:bh,
+        baseY: gy,
+        clearance,
+        colliders(){
+          const yClear = this.baseY - this.clearance;
+          const cx = this.x + this.w/2;
+          const coreW = Math.max(12, this.w * 0.30);
+          const spine = { x: cx - coreW/2, y: this.y, w: coreW, h: Math.max(1, yClear - this.y) };
+          const armY  = this.y + Math.max(12, this.h * 0.26);
+          const arm   = { x: cx - Math.max(16, this.w*0.40)/2, y: armY - 4, w: Math.max(16, this.w*0.40), h: 8 };
+          return [spine, arm];
+        }
+      });
+    }
   } else if (pick === "hvac") {
     const bw=44+Math.random()*36, bh=22+Math.random()*12;
     state.obstacles.push({type:"hvac",x:w+40,y:gy-bh,w:bw,h:bh});
@@ -81,17 +123,93 @@ export function spawnObstacle(state, canvas){
     const bw=44+Math.random()*42, bh=16+Math.random()*10;
     state.obstacles.push({type:"skylight",x:w+40,y:gy-bh,w:bw,h:bh,slope:Math.random()<0.5?1:-1});
   } else if (pick === "vent_pipe") {
-    const bw=16+Math.random()*8, bh=24+Math.random()*16;
-    state.obstacles.push({type:"vent_pipe",x:w+40,y:gy-bh,w:bw,h:bh});
+    // Thicker diameter (old was bh = 32)
+    const bh = 44;
+
+    // same length tiers as before
+    const tier = pickWeighted([
+      ["medium", 5],
+      ["long",   4],
+      ["xlong",  2],
+    ]);
+
+    // width (length) ranges per tier
+    const MED_MIN = 84,  MED_MAX = 108;
+    const LONG_MIN = 112, LONG_MAX = 148;
+    const XL_MIN  = 156,  XL_MAX  = 220;
+
+    let bw;
+    if (tier === "medium")      bw = MED_MIN + Math.random() * (MED_MAX - MED_MIN);
+    else if (tier === "long")   bw = LONG_MIN + Math.random() * (LONG_MAX - LONG_MIN);
+    else                        bw = XL_MIN  + Math.random() * (XL_MAX  - XL_MIN);
+
+    // keep thickness controlled by height, not width
+    const minWidthForConstantR = Math.ceil(bh * (0.30 / 0.18)) + 4;
+    bw = Math.max(bw, minWidthForConstantR, MED_MIN);
+
+    // straight-run fraction (unchanged feel)
+    const runFrac =
+      tier === "medium" ? (0.80 + Math.random() * 0.10) :
+      tier === "long"   ? (0.88 + Math.random() * 0.07) :
+                          (0.90 + Math.random() * 0.05);
+
+    // always draw brackets (your draw fn places the first near the grille)
+    const brackets = true;
+
+    state.obstacles.push({
+      type: "vent_pipe",
+      x: w + 40,
+      y: gy - bh,
+      w: bw,
+      h: bh,
+      runFrac,
+      brackets
+    });
   } else if (pick === "access_shed") {
     const bw=36+Math.random()*24, bh=34+Math.random()*20;
     state.obstacles.push({type:"access_shed",x:w+40,y:gy-bh,w:bw,h:bh,roofDir:Math.random()<0.5?-1:1});
   } else if (pick === "water_tank") {
-    const bw=28+Math.random()*10, bh=54+Math.random()*22;
-    state.obstacles.push({type:"water_tank",x:w+40,y:gy-bh,w:bw,h:bh});
+    const bw = 96 + Math.random()*54;  // base width
+    const bh = 46 + Math.random()*14;  // base height
+
+    // Randomly choose between the two tank styles
+    const variant = Math.random() < 0.5 ? "drum" : "poly_round";
+
+    let ww = bw, hh = bh;
+
+    if (variant === "poly_round") {
+      // Tiny height bump (tweak 4–8px to taste)
+      const polyExtraH = 6;
+      hh = Math.round(bh + polyExtraH);
+
+      // Keep the squat look: ~2× width relative to the (new) height
+      const desiredW = Math.round((hh - 2) * 2.0 + 12);
+      ww = Math.max(bw, desiredW);
+    }
+
+    state.obstacles.push({
+      type: "water_tank",
+      x: w + 40,
+      y: gy - hh,
+      w: ww,
+      h: hh,
+      variant
+    });
   } else if (pick === "billboard") {
-    const bw=110+Math.random()*70, bh=56+Math.random()*28;
-    state.obstacles.push({type:"billboard",x:w+40,y:gy-bh,w:bw,h:bh});
+    const bw = 110 + Math.random()*70, bh = 56 + Math.random()*28;
+
+    const variant = pickWeighted([
+      ["classic", 3],
+      ["slats",   4],
+      ["led",     3],
+      ["wood",    3],
+    ]);
+
+    state.obstacles.push({
+      type: "billboard",
+      x: w + 40, y: gy - bh, w: bw, h: bh,
+      variant, // <- optional: forces a specific face look
+    });
   } else if (pick === "water_tower_gate") {
     const bw = 84 + Math.random()*36;
     const clearance = 26 + Math.floor(Math.random()*4);
@@ -133,16 +251,17 @@ export function spawnObstacle(state, canvas){
       }
     });
   } else { // wire
-    const span=140+Math.random()*140 + extraSpan;
-    const y=gy-(48+Math.random()*26);
-    const sag=10+Math.random()*20, poleH=28+Math.random()*16;
+    const span  = 140 + Math.random()*140 + extraSpan;
+    const y     = gy - (48 + Math.random()*26);
+    const sag   = 10 + Math.random()*20;
+    const poleH = 28 + Math.random()*16;
 
     state.obstacles.push({
-      type:"wire",
-      x:w+40,
+      type: "wire",
+      x: w + 40,
       y,
-      w:span,
-      h:4,
+      w: span,
+      h: 4,
       sag,
       poleH,
       baseY: gy,
@@ -163,26 +282,24 @@ export function spawnObstacle(state, canvas){
         rects.push({ x: x2 - 3, y: y - poleH, w: 6, h: poleH });
 
         // cable segments
-        const N = 8;           // increase for tighter fit
-        const thickness = 8;   // hit thickness around the wire
-        const halfT = thickness / 2;
-
+        const N = 8, halfT = 8/2;
         const evalQ = (t) => {
           const mt = 1 - t;
-          const xt = mt*mt*x1 + 2*mt*t*cx + t*t*x2;
-          const yt = mt*mt*y  + 2*mt*t*cy + t*t*y;
-          return [xt, yt];
+          return [
+            mt*mt*x1 + 2*mt*t*cx + t*t*x2,
+            mt*mt*y  + 2*mt*t*cy + t*t*y
+          ];
         };
-
         for (let i = 0; i < N; i++){
           const t0 = i / N, t1 = (i + 1) / N;
           const [xA, yA] = evalQ(t0);
           const [xB, yB] = evalQ(t1);
-          const minX = Math.min(xA, xB);
-          const maxX = Math.max(xA, xB);
-          const minY = Math.min(yA, yB) - halfT;
-          const maxY = Math.max(yA, yB) + halfT;
-          rects.push({ x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) });
+          rects.push({
+            x: Math.min(xA, xB),
+            y: Math.min(yA, yB) - halfT,
+            w: Math.max(1, Math.abs(xB - xA)),
+            h: Math.max(1, Math.abs(yB - yA) + 2*halfT)
+          });
         }
         return rects;
       }
@@ -209,289 +326,320 @@ export function drawObstacles(ctx, state, t){
 }
 
 function drawChimney(ctx, o){
-  // --- soft back shadow to lift from background
+  // --- geometry
+  const R_TOP = 2;                      // small top corner radius
+  const R_BOT = 3;                      // small bottom radius
+  const TAPER = Math.max(3, Math.floor(o.w * 0.08)); // inward per side at top
+  const topY = o.y, botY = o.y + o.h;
+  const xTL = o.x + TAPER;              // tapered top-left x
+  const xTR = o.x + o.w - TAPER;        // tapered top-right x
+
+  // Build tapered-body path once
+  function pathBody(){
+    ctx.beginPath();
+    // top edge
+    ctx.moveTo(xTL + R_TOP, topY);
+    ctx.lineTo(xTR - R_TOP, topY);
+    ctx.quadraticCurveTo(xTR, topY, xTR, topY + R_TOP);
+    // right side → bottom
+    ctx.lineTo(o.x + o.w, botY - R_BOT);
+    ctx.quadraticCurveTo(o.x + o.w, botY, o.x + o.w - R_BOT, botY);
+    // bottom
+    ctx.lineTo(o.x + R_BOT, botY);
+    ctx.quadraticCurveTo(o.x, botY, o.x, botY - R_BOT);
+    // left side → top
+    ctx.lineTo(xTL, topY + R_TOP);
+    ctx.quadraticCurveTo(xTL, topY, xTL + R_TOP, topY);
+    ctx.closePath();
+  }
+  const fillBody = (style) => { ctx.save(); ctx.fillStyle = style; pathBody(); ctx.fill(); ctx.restore(); };
+  const clipBody = (fn) => { ctx.save(); pathBody(); ctx.clip(); fn(); ctx.restore(); };
+
+  // --- SOFT SHADOW (now conforms to tapered silhouette; won't stick out)
   ctx.save();
   ctx.globalAlpha = 0.16;
   ctx.fillStyle = PALETTE.obstacleOutline;
-  roundRect(ctx, o.x - 2, o.y - 2, o.w + 4, o.h + 4, 3, true);
-  ctx.restore();
-
-  // --- body fill (slight edge darkening so it feels blocky)
-  const gx = ctx.createLinearGradient(o.x, o.y, o.x + o.w, o.y);
-  gx.addColorStop(0.00, shade(PALETTE.obstacleFill, -14));
-  gx.addColorStop(0.20, shade(PALETTE.obstacleFill, -6));
-  gx.addColorStop(0.80, PALETTE.obstacleFill);
-  gx.addColorStop(1.00, shade(PALETTE.obstacleFill, -18));
-  ctx.fillStyle = gx;
-  roundRect(ctx, o.x, o.y, o.w, o.h, 3, true);
-
-  // --- left bevel shadow / right highlight (subtle)
-  ctx.save();
-  ctx.globalAlpha = 0.10;
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -35);
-  ctx.fillRect(o.x, o.y + 2, 3, o.h - 4);
-  ctx.globalAlpha = 0.08;
-  ctx.fillStyle = shade(PALETTE.obstacleFill, 22);
-  ctx.fillRect(o.x + o.w - 3, o.y + 3, 3, o.h - 6);
-  ctx.restore();
-
-  // --- crown (cap slab) with small overhang & drip shadow
-  const capOver = Math.min(6, Math.max(3, o.w * 0.16));
-  const capH = 7;
-  // drip shadow under cap
-  ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -10);
-  roundRect(ctx, o.x - capOver + 1, o.y - 1, o.w + 2*capOver - 2, 3, 2, true);
-  ctx.restore();
-  // cap body
-  const cg = ctx.createLinearGradient(o.x, o.y - capH, o.x, o.y);
-  cg.addColorStop(0, shade(PALETTE.obstacleFill, 8));
-  cg.addColorStop(1, shade(PALETTE.obstacleFill, -12));
-  ctx.fillStyle = cg;
-  roundRect(ctx, o.x - capOver, o.y - capH, o.w + capOver*2, capH, 3, true);
-
-  // tiny top ridge line on cap
-  ctx.save();
-  ctx.globalAlpha = 0.25;
-  ctx.strokeStyle = shade(PALETTE.obstacleFill, 20);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(o.x - capOver + 2, o.y - capH + 2);
-  ctx.lineTo(o.x + o.w + capOver - 2, o.y - capH + 2);
-  ctx.stroke();
-  ctx.restore();
-
-  // --- brick courses (staggered)
-  // “Mortar” color a touch darker than fill so it reads but stays subtle
-  const mortar = shade(PALETTE.obstacleFill, -35);
-  const rowH = 6;                  // course height
-  const brickW = 12;               // nominal brick width
-  ctx.save();
-  ctx.globalAlpha = 0.22;
-  ctx.strokeStyle = mortar;
-  ctx.lineWidth = 1;
-
-  // horizontal mortar lines
-  for (let y = o.y + 4; y < o.y + o.h - 4; y += rowH) {
-    ctx.beginPath();
-    ctx.moveTo(o.x + 3, y);
-    ctx.lineTo(o.x + o.w - 3, y);
-    ctx.stroke();
-
-    // vertical mortar lines (stagger each row by half a brick)
-    const rowIndex = Math.floor((y - (o.y + 4)) / rowH);
-    const offset = (rowIndex % 2 === 0) ? 0 : brickW * 0.5;
-    for (let x = o.x + 6 + offset; x < o.x + o.w - 6; x += brickW) {
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x, Math.min(y + rowH, o.y + o.h - 4));
-      ctx.stroke();
-    }
-  }
-  ctx.restore();
-
-  // --- soot streaks near the top (very subtle)
-  ctx.save();
-  ctx.globalAlpha = 0.10;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -5);
-  const sootTop = o.y + 4;
-  const sootBot = o.y + Math.min(o.h * 0.55, o.h - 10);
-  const stripe = (x, w) => { ctx.fillRect(x, sootTop, w, sootBot - sootTop); };
-  stripe(o.x + Math.floor(o.w * 0.28), 2);
-  stripe(o.x + Math.floor(o.w * 0.44), 1.5);
-  stripe(o.x + Math.floor(o.w * 0.66), 2);
-  ctx.restore();
-
-  // --- base flashing (little metal lip into the roof)
-  ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -40);
-  ctx.beginPath();
-  ctx.moveTo(o.x - 4, o.y + o.h - 2);
-  ctx.lineTo(o.x + 6, o.y + o.h + 4);
-  ctx.lineTo(o.x + o.w - 6, o.y + o.h + 4);
-  ctx.lineTo(o.x + o.w + 4, o.y + o.h - 2);
-  ctx.closePath();
+  pathBody();
   ctx.fill();
   ctx.restore();
 
-  // --- neon-ish outline (matches your overall vibe)
+  // --- BODY FILL (slight side beveling)
+  const gBody = ctx.createLinearGradient(o.x, topY, o.x + o.w, topY);
+  gBody.addColorStop(0.00, shade(PALETTE.obstacleFill, -12));
+  gBody.addColorStop(0.25, shade(PALETTE.obstacleFill, -4));
+  gBody.addColorStop(0.75, PALETTE.obstacleFill);
+  gBody.addColorStop(1.00, shade(PALETTE.obstacleFill, -18));
+  fillBody(gBody);
+
+  // side bevels (clipped just in case)
+  clipBody(() => {
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = shade(PALETTE.obstacleFill, -34);
+    ctx.fillRect(o.x, topY + 2, 3, o.h - 4);
+    ctx.globalAlpha = 0.08;
+    ctx.fillStyle = shade(PALETTE.obstacleFill, 18);
+    ctx.fillRect(o.x + o.w - 3, topY + 3, 2, o.h - 6);
+  });
+
+  // --- BRICK COURSES (clipped to the tapered body)
+  const mortar = shade(PALETTE.obstacleFill, -38);
+  const rowH = 6, brickW = 12;
+  clipBody(() => {
+    ctx.globalAlpha = 0.24;
+    ctx.strokeStyle = mortar;
+    ctx.lineWidth = 1;
+
+    for (let y = topY + 6; y < botY - 6; y += rowH) {
+      // lerp left/right per-row to respect taper
+      const t = (y - topY) / Math.max(1, o.h);
+      const leftX  = o.x + TAPER * (1 - t) + 4;
+      const rightX = o.x + o.w - TAPER * (1 - t) - 4;
+
+      // horizontal joint
+      ctx.beginPath(); ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); ctx.stroke();
+
+      // vertical (staggered)
+      const rowIdx = Math.floor((y - (topY + 6)) / rowH);
+      const offset = (rowIdx % 2 === 0) ? 0 : brickW * 0.5;
+      for (let x = leftX + 6 + offset; x < rightX - 6; x += brickW) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, Math.min(y + rowH, botY - 6)); ctx.stroke();
+      }
+    }
+  });
+
+  // tiny brick tint jitter (texture), still clipped
+  clipBody(() => {
+    ctx.globalAlpha = 0.10;
+    for (let y = topY + 6; y < botY - 6; y += rowH) {
+      const t = (y - topY) / Math.max(1, o.h);
+      const leftX  = o.x + TAPER * (1 - t) + 4;
+      const rightX = o.x + o.w - TAPER * (1 - t) - 4;
+      const rowIdx = Math.floor((y - (topY + 6)) / rowH);
+      const offset = (rowIdx % 2 === 0) ? 0 : brickW * 0.5;
+
+      for (let x = leftX + 6 + offset; x < rightX - 6; x += brickW) {
+        const tint = (Math.random()*2 - 1) * 6; // -6..6
+        ctx.fillStyle = shade(PALETTE.obstacleFill, tint);
+        ctx.fillRect(x + 1, y + 1, brickW - 2, rowH - 2);
+      }
+    }
+  });
+
+  // --- SOOT FADE
+  clipBody(() => {
+    ctx.globalAlpha = 0.12;
+    const hSoot = Math.min(0.50 * o.h, o.h - 10);
+    const soot = ctx.createLinearGradient(0, topY, 0, topY + hSoot);
+    soot.addColorStop(0, "rgba(0,0,0,0.35)");
+    soot.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = soot;
+    ctx.fillRect(o.x + 2, topY + 2, o.w - 4, hSoot);
+  });
+
+  // --- CONCRETE CAP (now **inside** the neon boundary—no protrusion)
+  const CAP_H = Math.max(6, Math.floor(o.h * 0.10));
+  const capInset = 3;                       // pulls cap away from neon edge
+  const capY = topY + 2;                    // BELOW the top edge (inside)
+  const capW = (xTR - xTL) - capInset*2;
+  const capX = xTL + capInset;
+
+  clipBody(() => {
+    const cg = ctx.createLinearGradient(0, capY, 0, capY + CAP_H);
+    cg.addColorStop(0, shade(PALETTE.obstacleFill, 10));
+    cg.addColorStop(1, shade(PALETTE.obstacleFill, -14));
+    ctx.fillStyle = cg;
+    roundRect(ctx, capX, capY, capW, CAP_H, 2, true);
+
+    // thin top ridge
+    ctx.globalAlpha = 0.28;
+    ctx.strokeStyle = shade(PALETTE.obstacleFill, 22);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(capX + 2, capY + 1.5);
+    ctx.lineTo(capX + capW - 2, capY + 1.5);
+    ctx.stroke();
+  });
+
+  // --- SOLDIER COURSE just under cap (vertical bricks), clipped
+  clipBody(() => {
+    const bandTop = capY + CAP_H + 1;
+    const bandH   = 5;
+    ctx.globalAlpha = 0.30;
+    ctx.fillStyle = shade(PALETTE.obstacleFill, -10);
+    ctx.fillRect(xTL + 2, bandTop, (xTR - xTL) - 4, bandH);
+
+    ctx.globalAlpha = 0.40;
+    ctx.strokeStyle = shade(PALETTE.obstacleFill, -36);
+    for (let x = xTL + 5; x < xTR - 5; x += 6) {
+      ctx.beginPath(); ctx.moveTo(x, bandTop); ctx.lineTo(x, bandTop + bandH); ctx.stroke();
+    }
+  });
+
+  // --- NEON outline (follows tapered silhouette precisely)
   neonStrokePath(
     ctx,
     PALETTE.obstacleOutline,
-    2,    // width
-    6,    // glow
-    0.55, // alpha
-    () => roundRectPath(ctx, o.x, o.y, o.w, o.h, 3)
-  );
-
-  // optional: a faint cap outline too (kept subtle)
-  neonStrokePath(
-    ctx,
-    shade(PALETTE.obstacleOutline, -12),
-    1.4,
-    4,
-    0.35,
-    () => roundRectPath(ctx, o.x - capOver, o.y - capH, o.w + capOver*2, capH, 3)
+    2.0, 6, 0.55,
+    () => pathBody()
   );
 }
 
 function drawAntenna(ctx, o, t){
-  const cx = o.x + o.w/2;
-  const top = o.y;
-  const bot = o.y + o.h;
+  if (o.variant === "pylon") {
+    // -------- Y-pylon (duckable base) --------
+    const cx = o.x + o.w/2;
+    const top = o.y;
+    const baseY = o.baseY ?? (o.y + o.h);
+    const yClear = baseY - (o.clearance ?? 30);  // top of pass-through
 
-  // mast tube width (kept slim, scales with obstacle width)
-  const mW = Math.max(2, Math.min(4, Math.round(o.w * 0.45)));
+    // proportions (all relative → scale friendly)
+    const footOut   = Math.max(8, 0.46 * o.w);
+    const waistY    = top + Math.max(18, o.h * 0.52);
+    const waistW    = Math.max(8,  0.20 * o.w);
+    const shoulderY = top + Math.max(10, o.h * 0.28);
+    const armSpan   = Math.max(28, 0.95 * o.w);
+    const armW      = Math.max(12, 0.36 * o.w);
+    const legW      = 3;
 
-  // --- soft back shadow to lift from background
-  ctx.save();
-  ctx.globalAlpha = 0.14;
-  ctx.fillStyle = PALETTE.obstacleOutline;
-  roundRect(ctx, cx - (mW+4)/2, top - 3, mW + 4, o.h + 6, 3, true);
-  ctx.restore();
+    // key points
+    const Lf = { x: cx - footOut,  y: baseY };
+    const Rf = { x: cx + footOut,  y: baseY };
+    const Lw = { x: cx - waistW/2, y: waistY };
+    const Rw = { x: cx + waistW/2, y: waistY };
+    const Ls = { x: cx - armW/2,   y: shoulderY };
+    const Rs = { x: cx + armW/2,   y: shoulderY };
+    const La = { x: cx - armSpan/2, y: shoulderY - 2 };
+    const Ra = { x: cx + armSpan/2, y: shoulderY - 2 };
 
-  // --- base plate (mount)
-  const plateW = Math.max(o.w + 10, 18);
-  const plateH = 6;
-  const plateX = cx - plateW/2;
-  const plateY = bot - plateH;
-  const pg = ctx.createLinearGradient(plateX, plateY, plateX, plateY + plateH);
-  pg.addColorStop(0, shade(PALETTE.obstacleFill, 12));
-  pg.addColorStop(1, shade(PALETTE.obstacleFill, -18));
-  ctx.fillStyle = pg;
-  roundRect(ctx, plateX, plateY, plateW, plateH, 3, true);
+    // REMOVED: the soft back shadow that looked like a blue square.
 
-  // tiny bolts on plate
-  ctx.save();
-  ctx.globalAlpha = 0.6;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -10);
-  const boltY = plateY + plateH - 2;
-  ctx.fillRect(plateX + 4,             boltY, 2, 2);
-  ctx.fillRect(plateX + plateW - 6,    boltY, 2, 2);
-  ctx.fillRect(plateX + Math.floor(plateW/2) - 1, boltY, 2, 2);
-  ctx.restore();
+    // steel gradient
+    const metal = ctx.createLinearGradient(o.x, top, o.x + o.w, top);
+    metal.addColorStop(0, shade(PALETTE.obstacleFill, -22));
+    metal.addColorStop(0.5, PALETTE.obstacleFill);
+    metal.addColorStop(1, shade(PALETTE.obstacleFill, -26));
+    ctx.strokeStyle = metal;
+    ctx.lineWidth = legW;
+    ctx.lineCap = "round";
 
-  // --- mast tube (vertical)
-  const mg = ctx.createLinearGradient(cx - mW/2, top, cx + mW/2, top);
-  mg.addColorStop(0, shade(PALETTE.obstacleFill, -20));
-  mg.addColorStop(0.5, PALETTE.obstacleFill);
-  mg.addColorStop(1, shade(PALETTE.obstacleFill, -28));
-  ctx.fillStyle = mg;
-  roundRect(ctx, cx - mW/2, top, mW, o.h - plateH + 1, Math.min(2, mW*0.6), true);
+    // silhouette
+    ctx.beginPath();
+    ctx.moveTo(Lf.x, Lf.y); ctx.lineTo(Lw.x, Lw.y);
+    ctx.lineTo(Ls.x, Ls.y); ctx.lineTo(La.x, La.y);
+    ctx.lineTo(Ra.x, Ra.y);
+    ctx.lineTo(Rs.x, Rs.y); ctx.lineTo(Rw.x, Rw.y); ctx.lineTo(Rf.x, Rf.y);
+    ctx.stroke();
 
-  // --- segmented clamps around the mast
-  ctx.save();
-  ctx.globalAlpha = 0.28;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -18);
-  const clampH = 3;
-  const startY = top + 10;
-  const endY = bot - plateH - 6;
-  for (let y = startY; y < endY; y += 16) {
-    roundRect(ctx, cx - (mW+6)/2, y, mW + 6, clampH, 2, true);
-  }
-  ctx.restore();
-
-  // --- diagonal braces (left/right stand-offs)
-  ctx.save();
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -8);
-  ctx.lineWidth = 2;
-  ctx.globalAlpha = 0.85;
-
-  const b1 = top + Math.max(8, o.h * 0.25);
-  const b2 = top + Math.max(18, o.h * 0.45);
-
-  ctx.beginPath();
-  ctx.moveTo(cx, b1);
-  ctx.lineTo(o.x + 2, b1 + Math.min(14, o.w * 0.8));
-  ctx.moveTo(cx, b2);
-  ctx.lineTo(o.x + o.w - 2, b2 + Math.min(14, o.w * 0.8));
-  ctx.stroke();
-  ctx.restore();
-
-  // --- coax cable run (a slim curve down the mast to the plate)
-  ctx.save();
-  ctx.globalAlpha = 0.45;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -2);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx + mW/2, top + 12);
-  ctx.quadraticCurveTo(cx + 10, top + o.h * 0.35, plateX + plateW - 6, plateY + 2);
-  ctx.stroke();
-  ctx.restore();
-
-  // --- beacon at the top with pulse halo
-  const capR = Math.max(2.5, mW * 0.8);
-  const pulse = 0.5 + 0.5 * Math.sin(t * 6); // 0..1
-  const beaconX = cx;
-  const beaconY = top + 2;
-
-  // halo
-  ctx.save();
-  ctx.globalAlpha = 0.28 * (0.6 + 0.4 * pulse);
-  ctx.strokeStyle = "#5bbcff";
-  ctx.lineWidth = 2 + pulse * 2;
-  ctx.beginPath();
-  ctx.arc(beaconX, beaconY, 9 + pulse * 5, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-
-  // beacon dome
-  ctx.save();
-  const bg = ctx.createLinearGradient(beaconX - capR, beaconY - capR, beaconX + capR, beaconY + capR);
-  bg.addColorStop(0, "rgba(255,120,120,0.95)");
-  bg.addColorStop(1, "rgba(255,80,80,0.9)");
-  ctx.fillStyle = bg;
-  ctx.beginPath();
-  ctx.arc(beaconX, beaconY, capR, 0, Math.PI * 2);
-  ctx.fill();
-
-  // tiny specular highlight
-  ctx.globalAlpha = 0.6;
-  ctx.fillStyle = "rgba(255,255,255,0.8)";
-  ctx.beginPath();
-  ctx.arc(beaconX - capR * 0.35, beaconY - capR * 0.35, capR * 0.3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // --- subtle rim at the mast top (cap ring)
-  ctx.save();
-  ctx.globalAlpha = 0.5;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -18);
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(cx - mW/2 - 1, top + 6);
-  ctx.lineTo(cx + mW/2 + 1, top + 6);
-  ctx.stroke();
-  ctx.restore();
-
-  // --- neon-ish accents
-  // mast glow
-  neonStrokePath(
-    ctx,
-    PALETTE.obstacleOutline,
-    2,
-    6,
-    0.55,
-    () => { ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx, bot - plateH); }
-  );
-
-  // brace glow (lighter)
-  neonStrokePath(
-    ctx,
-    shade(PALETTE.obstacleOutline, -6),
-    1.6,
-    4,
-    0.45,
-    () => {
+    // lattice
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    // base → waist
+    for (let i=0;i<4;i++){
+      const t0=i/4, t1=(i+1)/4;
+      const ly0 = baseY - (baseY - waistY)*t0;
+      const ly1 = baseY - (baseY - waistY)*t1;
+      const lx0 = Lf.x + (Lw.x - Lf.x)*t0;
+      const lx1 = Lf.x + (Lw.x - Lf.x)*t1;
+      const rx0 = Rf.x + (Rw.x - Rf.x)*t0;
+      const rx1 = Rf.x + (Rw.x - Rf.x)*t1;
       ctx.beginPath();
-      ctx.moveTo(cx, b1); ctx.lineTo(o.x + 2, b1 + Math.min(14, o.w * 0.8));
-      ctx.moveTo(cx, b2); ctx.lineTo(o.x + o.w - 2, b2 + Math.min(14, o.w * 0.8));
+      ctx.moveTo(lx0, ly0); ctx.lineTo(rx1, ly1);
+      ctx.moveTo(rx0, ly0); ctx.lineTo(lx1, ly1);
+      ctx.stroke();
     }
-  );
-}
+    // waist → shoulders
+    for (let i=0;i<3;i++){
+      const t0=i/3, t1=(i+1)/3;
+      const uy0 = waistY - (waistY - shoulderY)*t0;
+      const uy1 = waistY - (waistY - shoulderY)*t1;
+      const lx0 = Lw.x + (Ls.x - Lw.x)*t0;
+      const lx1 = Lw.x + (Ls.x - Lw.x)*t1;
+      const rx0 = Rw.x + (Rs.x - Rw.x)*t0;
+      const rx1 = Rw.x + (Rs.x - Rw.x)*t1;
+      ctx.beginPath();
+      ctx.moveTo(lx0, uy0); ctx.lineTo(rx1, uy1);
+      ctx.moveTo(rx0, uy0); ctx.lineTo(lx1, uy1);
+      ctx.stroke();
+    }
+    ctx.restore();
 
+    // small droppers (insulators) from arm tips
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -6);
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(La.x, La.y); ctx.lineTo(La.x, La.y + 8);
+    ctx.moveTo(Ra.x, Ra.y); ctx.lineTo(Ra.x, Ra.y + 8);
+    ctx.stroke();
+    ctx.restore();
+
+    // base feet
+    ctx.save();
+    ctx.fillStyle = shade(PALETTE.obstacleFill, -30);
+    roundRect(ctx, Lf.x - 6, baseY - 3, 12, 6, 3, true);
+    roundRect(ctx, Rf.x - 6, baseY - 3, 12, 6, 3, true);
+    ctx.restore();
+
+    // “duck line” (visual only, not neon)
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -14);
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(Lw.x + 4, yClear); ctx.lineTo(Rw.x - 4, yClear); ctx.stroke();
+    ctx.restore();
+
+    // neon on blocking silhouette only
+    neonStrokePath(ctx, PALETTE.obstacleOutline, 1.8, 5, 0.55, () => {
+      ctx.beginPath();
+      ctx.moveTo(Ls.x, Ls.y); ctx.lineTo(Lw.x, Lw.y); ctx.lineTo(cx, yClear);
+      ctx.moveTo(Rs.x, Rs.y); ctx.lineTo(Rw.x, Rw.y); ctx.lineTo(cx, yClear);
+      ctx.moveTo(La.x, La.y); ctx.lineTo(Ra.x, Ra.y); // cross-arm
+    });
+
+  } else {
+    // -------- classic mast (unchanged) --------
+    const cx = o.x + o.w/2;
+    const top = o.y;
+    const bot = o.y + o.h;
+    const mW = Math.max(2, Math.min(4, Math.round(o.w * 0.45)));
+
+    const plateW = Math.max(o.w + 10, 18);
+    const plateH = 6, plateX = cx - plateW/2, plateY = bot - plateH;
+    const pg = ctx.createLinearGradient(plateX, plateY, plateX, plateY + plateH);
+    pg.addColorStop(0, shade(PALETTE.obstacleFill, 12));
+    pg.addColorStop(1, shade(PALETTE.obstacleFill, -18));
+    ctx.fillStyle = pg; roundRect(ctx, plateX, plateY, plateW, plateH, 3, true);
+
+    const mg = ctx.createLinearGradient(cx - mW/2, top, cx + mW/2, top);
+    mg.addColorStop(0, shade(PALETTE.obstacleFill, -20));
+    mg.addColorStop(0.5, PALETTE.obstacleFill);
+    mg.addColorStop(1, shade(PALETTE.obstacleFill, -28));
+    ctx.fillStyle = mg;
+    roundRect(ctx, cx - mW/2, top, mW, o.h - plateH + 1, Math.min(2, mW*0.6), true);
+
+    ctx.save(); ctx.globalAlpha = 0.28; ctx.fillStyle = shade(PALETTE.obstacleOutline, -18);
+    for (let y = top + 10; y < bot - plateH - 6; y += 16)
+      roundRect(ctx, cx - (mW+6)/2, y, mW + 6, 3, 2, true);
+    ctx.restore();
+
+    const capR = Math.max(2.5, mW * 0.8);
+    const pulse = 0.5 + 0.5 * Math.sin(t * 6);
+    const bx = cx, by = top + 2;
+    ctx.save(); ctx.globalAlpha = 0.28 * (0.6 + 0.4*pulse);
+    ctx.strokeStyle = "#5bbcff"; ctx.lineWidth = 2 + pulse*2;
+    ctx.beginPath(); ctx.arc(bx, by, 9 + pulse*5, 0, Math.PI*2); ctx.stroke(); ctx.restore();
+    ctx.save();
+    const bg = ctx.createLinearGradient(bx - capR, by - capR, bx + capR, by + capR);
+    bg.addColorStop(0, "rgba(255,120,120,0.95)"); bg.addColorStop(1, "rgba(255,80,80,0.9)");
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(bx, by, capR, 0, Math.PI*2); ctx.fill(); ctx.restore();
+
+    neonStrokePath(ctx, PALETTE.obstacleOutline, 2, 6, 0.55, () => {
+      ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx, bot - plateH);
+    });
+  }
+}
 
 function drawHVAC(ctx, o){
   const r = 4;                 // corner radius
@@ -660,7 +808,6 @@ function drawHVAC(ctx, o){
   );
 }
 
-
 function drawSkylight(ctx, o){
   const slope = o.slope || 1;
   const left  = o.x;
@@ -782,142 +929,291 @@ function _skylightPath(ctx, left, yBot, right, ridge, inset = 8){
   ctx.closePath();
 }
 
-function drawVentPipe(ctx, o){
+// ============
+function drawVentPipe(ctx, o) {
   const x = o.x, y = o.y, w = o.w, h = o.h;
-  const yBot = y + h;
-  const cx = x + w/2;
+  const deckY = y + h;
 
-  // --- 1) Tar patch (NYC roofs ❤️ tar blobs)
-  const tarH = 6;
+  // --- Sizing ---------------------------------------------------------------
+  const pad = 6;
+  const R   = Math.max(10, Math.min(20, Math.floor(Math.min(h * 0.30, w * 0.18))));
+  const ReLayout = Math.round(R * 1.12);     // keep old layout “fatter” elbow for placement only
+  const Re       = R;                        // draw with constant thickness
+  const collarL  = Math.max(10, Math.floor(R * 1.2));
+
+  const yMid = Math.min(deckY - Re - 8, y + Math.max(Re + 10, Math.floor(h * 0.52)));
+  const leftC = x + pad + R;
+
+  // Horizontal run (compute with ReLayout so spacing/length feeling stays identical)
+  const elbowMaxC = x + w - pad - ReLayout;
+  const maxRun = Math.max(8, Math.floor(elbowMaxC - (leftC + ReLayout + collarL)));
+  const runLenRaw =
+    (typeof o.runPx === "number" ? o.runPx :
+    (typeof o.runFrac === "number" ? o.runFrac * maxRun : 0.90 * maxRun));
+  const runLen = Math.max(8, Math.min(maxRun, Math.floor(runLenRaw)));
+
+  // Keep rightmost tip position identical after switching to Re = R
+  const extra = 2 * (ReLayout - Re);
+  const stepStartX = leftC + runLen + extra;     // where it “steps” to collar before elbow
+  const elbowC     = stepStartX + Re + collarL;
+  const kneeInset  = Math.max(2, Math.floor(R * 0.15));
+
+  // --- Silhouette -----------------------------------------------------------
+  const P = new Path2D();
+  P.moveTo(leftC, yMid - R);
+  P.lineTo(stepStartX, yMid - R);
+  P.lineTo(elbowC - Re - kneeInset, yMid - Re);
+  P.lineTo(elbowC, yMid - Re);
+  P.arc(elbowC, yMid, Re, -Math.PI/2, 0, false);
+  P.lineTo(elbowC + Re, deckY);
+  P.lineTo(elbowC - Re, deckY);
+  P.lineTo(elbowC - Re, yMid);
+  P.arc(elbowC, yMid, Re, Math.PI, Math.PI/2, true);
+  P.lineTo(elbowC - Re - kneeInset, yMid + Re);
+  P.lineTo(stepStartX, yMid + R);
+  P.lineTo(leftC, yMid + R);
+  P.arc(leftC, yMid, R, Math.PI/2, -Math.PI/2, false);
+  P.closePath();
+
+  // --- Fill (galvanized) ----------------------------------------------------
+  const g = ctx.createLinearGradient(x, yMid - Re, x, yMid + Re);
+  g.addColorStop(0.00, shade(PALETTE.obstacleFill, -20));
+  g.addColorStop(0.42, shade(PALETTE.obstacleFill,  +8));
+  g.addColorStop(0.58, shade(PALETTE.obstacleFill, +12));
+  g.addColorStop(1.00, shade(PALETTE.obstacleFill, -24));
+  ctx.fillStyle = g;
+  ctx.fill(P);
+
+  // Soft rim darkening
   ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -40);
-  roundRect(ctx, x - 6, yBot - Math.floor(tarH*0.6), w + 12, tarH, 3, true);
+  ctx.clip(P);
+  ctx.globalAlpha = 0.25;
+  ctx.lineWidth = Math.max(1, Math.floor(R * 0.18));
+  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -28);
+  ctx.beginPath(); ctx.moveTo(leftC - R, yMid - R + 1); ctx.lineTo(elbowC + Re, yMid - Re + 1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(leftC - R, yMid + R - 1); ctx.lineTo(elbowC + Re, yMid + Re - 1); ctx.stroke();
   ctx.restore();
 
-  // --- 2) Sheet-metal flashing (under the boot)
-  const flPad = Math.max(3, Math.min(6, Math.floor(w*0.25)));
-  const fx = x - flPad, fw = w + flPad*2;
-  const fh = Math.max(5, Math.min(8, Math.floor(h*0.22)));
-  const fy = yBot - fh - 1;
-  const flashGrad = ctx.createLinearGradient(fx, fy, fx, fy + fh);
-  flashGrad.addColorStop(0, shade(PALETTE.obstacleFill, 14));
-  flashGrad.addColorStop(1, shade(PALETTE.obstacleFill, -8));
-  ctx.fillStyle = flashGrad;
-  ctx.beginPath();
-  ctx.moveTo(fx + 2,      fy);
-  ctx.lineTo(fx + fw - 2, fy);
-  ctx.lineTo(fx + fw,     fy + 2);
-  ctx.lineTo(fx + fw - 2, fy + fh);
-  ctx.lineTo(fx + 2,      fy + fh);
-  ctx.lineTo(fx,          fy + 2);
-  ctx.closePath();
-  ctx.fill();
+  // Rolled seams along run
+  (function runSeams() {
+    const startX = leftC + Math.max(8, R * 0.6);
+    const endX   = stepStartX - Math.max(6, R * 0.4);
+    const step   = Math.max(12, Math.floor(R * 1.05));
+    ctx.save(); ctx.globalAlpha = 0.3;
+    for (let xi = startX; xi <= endX; xi += step) {
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -22);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(xi, yMid - (R - 0.5)); ctx.lineTo(xi, yMid + (R - 0.5)); ctx.stroke();
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +28);
+      ctx.beginPath(); ctx.moveTo(xi + 1, yMid - (R - 2)); ctx.lineTo(xi + 1, yMid + (R - 2)); ctx.stroke();
+    }
+    ctx.restore();
+  })();
 
-  // --- 3) Rubber/lead boot collar hugging the pipe
-  const collarH = Math.max(4, Math.min(8, Math.floor(h * 0.18)));
-  const collarY = yBot - fh - Math.floor(collarH * 0.7);
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -16);
-  roundRect(ctx, x - 1, collarY, w + 2, collarH, 3, true);
+  // Collar bands
+  (function collarBands() {
+    const xs = [stepStartX + 2, elbowC - Re - Math.max(2, R * 0.1)];
+    ctx.save(); ctx.globalAlpha = 0.35;
+    for (const xi of xs) {
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -25);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(xi, yMid - Re); ctx.lineTo(xi, yMid + Re); ctx.stroke();
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +26);
+      ctx.beginPath(); ctx.moveTo(xi + 1, yMid - (Re - 2)); ctx.lineTo(xi + 1, yMid + (Re - 2)); ctx.stroke();
+    }
+    ctx.restore();
+  })();
 
-  // --- 4) Pipe geometry (centerline path of a gooseneck)
-  // vertical riser, then a smooth elbow turning downward
-  const pipeW = Math.max(6, Math.min(9, Math.floor(w * 0.8))); // visual thickness
-  const riseH = Math.max(12, Math.floor(h * 0.55));
-  const elbowR = Math.max(8, Math.min(16, Math.floor(h * 0.33))); // elbow radius
-  const baseY = yBot - fh - Math.floor(collarH * 0.6);
+  // Elbow gore seams
+  (function elbowGores() {
+    ctx.save(); ctx.globalAlpha = 0.32;
+    const stepR = Math.max(3.5, Re * 0.18);
+    for (let r = Re * 0.85; r >= Re * 0.40; r -= stepR) {
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -25);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(elbowC, yMid, r, -Math.PI/2 + 0.06, 0 - 0.06, false); ctx.stroke();
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +24);
+      ctx.beginPath(); ctx.arc(elbowC, yMid, r - 1, -Math.PI/2 + 0.12, 0 - 0.12, false); ctx.stroke();
+    }
+    ctx.restore();
+  })();
 
-  // mouth (downward tip) offset
-  const mouthDown = Math.max(6, Math.floor(elbowR * 0.75));
-  const mouthX = cx + elbowR;              // curve to the right; flip if you want
-  const mouthY = baseY - riseH + elbowR;   // bottom of the elbow arc
+  // Leg seams
+  (function legSeams() {
+    const startY = yMid + Math.max(8, Re * 0.3);
+    const endY   = deckY - Math.max(6, Re * 0.25);
+    const step   = Math.max(12, Math.floor(Re * 1.05));
+    ctx.save(); ctx.globalAlpha = 0.3;
+    for (let yi = startY; yi <= endY; yi += step) {
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -22);
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(elbowC - (Re - 0.5), yi); ctx.lineTo(elbowC + (Re - 0.5), yi); ctx.stroke();
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +28);
+      ctx.beginPath(); ctx.moveTo(elbowC - (Re - 2), yi + 1); ctx.lineTo(elbowC + (Re - 2), yi + 1); ctx.stroke();
+    }
+    ctx.restore();
+  })();
 
-  // Helper to trace the gooseneck centerline
-  const traceGooseneck = () => {
-    ctx.beginPath();
-    // straight up
-    ctx.moveTo(cx, baseY);
-    ctx.lineTo(cx, baseY - riseH);
-    // quarter-curve to the right
-    ctx.quadraticCurveTo(cx + elbowR, baseY - riseH, mouthX, baseY - riseH + elbowR);
-    // short downturned tip
-    ctx.lineTo(mouthX, mouthY + mouthDown);
-  };
+  // ---------- Flanged grille: THINNER & FEWER horizontal lines ---------------
+  (function thinLineGrille(){
+    const outerR = R - 1;                   // flange
+    const openR  = Math.max(2, R - 3);      // circular opening
 
-  // Outer soft “sheen” stroke (gives a rounded metal look)
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "rgba(190,210,255,0.45)";
-  ctx.lineWidth = pipeW + 3;
-  traceGooseneck(); ctx.stroke();
-  ctx.restore();
+    // flange ring + inner sheen
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -22);
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(leftC, yMid, outerR, 0, Math.PI*2); ctx.stroke();
+    ctx.globalAlpha = 0.55;
+    ctx.strokeStyle = shade(PALETTE.obstacleFill, +30);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(leftC, yMid, openR - 0.6, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
 
-  // Main pipe body (galvanized)
-  const pipeGrad = ctx.createLinearGradient(x, y, x + w, y);
-  pipeGrad.addColorStop(0.00, shade(PALETTE.obstacleFill, -12));
-  pipeGrad.addColorStop(0.45, shade(PALETTE.obstacleFill, 8));
-  pipeGrad.addColorStop(1.00, shade(PALETTE.obstacleFill, -18));
-  ctx.save();
-  ctx.strokeStyle = pipeGrad;
-  ctx.lineWidth = pipeW;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  traceGooseneck(); ctx.stroke();
-  ctx.restore();
+    // clip to the circular opening
+    ctx.save();
+    const clip = new Path2D();
+    clip.arc(leftC, yMid, openR - 0.6, 0, Math.PI*2);
+    ctx.clip(clip);
 
-  // seam on the riser + a clamp band
-  ctx.save();
-  ctx.globalAlpha = 0.35;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -24);
-  ctx.lineWidth = 1;
-  // vertical seam
-  const seamTop = baseY - riseH + 4;
-  ctx.beginPath();
-  ctx.moveTo(cx + Math.floor(w*0.28), baseY - 3);
-  ctx.lineTo(cx + Math.floor(w*0.28), seamTop);
-  ctx.stroke();
-  // clamp band around the riser
-  const bandY = baseY - Math.floor(riseH * 0.55);
-  ctx.beginPath();
-  ctx.moveTo(cx - Math.floor(w*0.45), bandY);
-  ctx.lineTo(cx + Math.floor(w*0.45), bandY);
-  ctx.stroke();
-  ctx.restore();
+    // recessed cavity
+    const rg = ctx.createRadialGradient(leftC - R*0.15, yMid - R*0.15, 1, leftC, yMid, openR);
+    rg.addColorStop(0, shade(PALETTE.obstacleFill, -12));
+    rg.addColorStop(1, shade(PALETTE.obstacleOutline, -48));
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(leftC, yMid, openR, 0, Math.PI*2); ctx.fill();
 
-  // Downturned mouth opening (dark ellipse under the tip)
-  ctx.save();
-  ctx.fillStyle = "rgba(10,20,30,0.85)";
-  ctx.beginPath();
-  ctx.ellipse(mouthX, mouthY + mouthDown, Math.max(2.2, pipeW*0.35), 1.6, 0, 0, Math.PI*2);
-  ctx.fill();
-  ctx.restore();
+    // --- THIN HORIZONTAL LINES (fewer + more spread out) ---
+    const sideGap = 1.2;                                   // tiny gap at ends
+    const margin  = Math.max(3, Math.round(R * 0.22));     // keep away from rim a bit more
+    const pitch   = Math.max(3, Math.round(R * (o.grillePitchMul || 0.34)));
+    // ↑ was ~0.18; 0.34 ≈ half as many lines. Raise to 0.38 for even fewer.
 
-  // Tiny drip lip highlight
-  ctx.save();
-  ctx.globalAlpha = 0.35;
-  ctx.strokeStyle = "rgba(220,240,255,0.6)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(mouthX - pipeW*0.35, mouthY + mouthDown - 0.5);
-  ctx.lineTo(mouthX + pipeW*0.35, mouthY + mouthDown - 0.5);
-  ctx.stroke();
-  ctx.restore();
+    const top    = yMid - openR + margin;
+    const bottom = yMid + openR - margin;
 
-  // --- Soft neon outline for readability (follows the pipe path)
-  neonStrokePath(ctx, PALETTE.obstacleOutline, 1.6, 4, 0.55, traceGooseneck);
+    ctx.lineWidth = 1;
+    ctx.lineCap = "round";
 
-  // Optional: subtle outline around the flashing to match your style
-  neonStrokePath(ctx, PALETTE.obstacleOutline, 1.2, 3, 0.45, () => {
-    ctx.beginPath();
-    ctx.moveTo(fx + 2,      fy);
-    ctx.lineTo(fx + fw - 2, fy);
-    ctx.lineTo(fx + fw,     fy + 2);
-    ctx.lineTo(fx + fw - 2, fy + fh);
-    ctx.lineTo(fx + 2,      fy + fh);
-    ctx.lineTo(fx,          fy + 2);
-    ctx.closePath();
-  });
+    for (let yy = top; yy <= bottom; yy += pitch) {
+      const dy   = yy - yMid;
+      const half = Math.sqrt(Math.max(0, (openR - sideGap)**2 - dy*dy));
+      const L = leftC - half, Rr = leftC + half;
+
+      // dark line (half-pixel for crispness)
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -36);
+      ctx.beginPath();
+      ctx.moveTo(L, Math.round(yy) + 0.5);
+      ctx.lineTo(Rr, Math.round(yy) + 0.5);
+      ctx.stroke();
+
+      // faint highlight just above
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +22);
+      ctx.beginPath();
+      ctx.moveTo(L + 1, Math.round(yy) - 0.5);
+      ctx.lineTo(Rr - 1, Math.round(yy) - 0.5);
+      ctx.stroke();
+    }
+
+    ctx.restore(); // end circular clip
+  })();
+
+  // ---------- Optional: Rain hood over inlet --------------------------------
+  (function inletHood() {
+    if (o.startStyle !== "hood") return; // default: grille only
+    const outer = new Path2D();
+    const inner = new Path2D();
+    outer.arc(leftC, yMid, R - 0.8, Math.PI * 0.60, Math.PI * 1.40);
+    inner.arc(leftC, yMid, R - 4.8, Math.PI * 1.40, Math.PI * 0.60, true);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = shade(PALETTE.obstacleFill, -10);
+    ctx.beginPath(); outer.addPath(inner); ctx.fill(outer);
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = shade(PALETTE.obstacleFill, +26);
+    ctx.stroke(outer);
+    ctx.restore();
+  })();
+
+  // ---------- Tiny brackets (v7: start at grille, step rightward) --------------
+  (function brackets() {
+    // Straight run just after the flange up to the collar step (no elbow/collar)
+    const leftBound  = leftC + Math.max(R * 0.85, 6);          // just past the grille flange
+    const rightBound = stepStartX - Math.max(R * 0.35, 6);     // stop before collar step
+    const usable = rightBound - leftBound;
+    if (usable <= 2) return;
+
+    // Base sizes
+    const legWBase   = Math.max(2, Math.floor(R * 0.22));
+    const strapH     = Math.max(2, Math.floor(R * 0.26));
+    const strapWBase = Math.max(9, Math.floor(R * 0.85));
+    const topY       = yMid + R - 1;
+    const legH       = Math.max(4, deckY - topY + 1);
+
+    // Draw one bracket at xi; strap auto-shrinks if near the ends so it always fits
+    function drawBracket(xi){
+      const leftAvail  = Math.max(0, (xi - leftBound)  - 1);
+      const rightAvail = Math.max(0, (rightBound - xi) - 1);
+      const half = Math.max(4, Math.min(strapWBase * 0.5, leftAvail, rightAvail));
+      const strapW = Math.max(6, Math.floor(half * 2));
+      const legW   = legWBase;
+
+      // vertical leg
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = shade(PALETTE.obstacleOutline, -42);
+      roundRect(ctx, xi - legW / 2, topY, legW, legH, 2, true);
+
+      // foot pad
+      roundRect(ctx, xi - legW * 1.4, deckY - 3, legW * 2.8, 4, 2, true);
+
+      // strap
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = shade(PALETTE.obstacleOutline, -36);
+      roundRect(ctx, xi - strapW / 2, yMid + R - strapH - 1, strapW, strapH, strapH / 2, true);
+
+      // tiny highlight
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +24);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(xi - strapW * 0.45, yMid + R - 1.5);
+      ctx.lineTo(xi + strapW * 0.45, yMid + R - 1.5);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.save();
+
+    // 1) ALWAYS start with a bracket near the grille
+    const startClear = Math.max(2, R * 0.18);                  // small offset from flange
+    let firstX = leftBound + startClear;
+    firstX = Math.max(leftBound + 3, Math.min(firstX, rightBound - 3));
+    drawBracket(firstX);
+
+    // 2) Then step rightward with the same (doubled) spacing you’re using now
+    const baseSpacing = Math.max(20, Math.floor(R * 1.4));
+    const spacing     = (o.bracketSpacingMul ?? 2) * baseSpacing; // “double” default
+
+    for (let xi = firstX + spacing; xi <= rightBound - 3; xi += spacing) {
+      drawBracket(xi);
+    }
+
+    ctx.restore();
+  })();
+
+  // Neon outline
+  neonStrokePath(
+    ctx,
+    PALETTE.obstacleOutline,
+    2.0,
+    5.5,
+    0.62,
+    () => { ctx.stroke(P); }
+  );
 }
 
 function drawAccessShed(ctx, o){
@@ -1204,222 +1500,239 @@ function drawAccessShed(ctx, o){
 }
 
 function drawWaterTank(ctx, o){
-  const x = o.x, y = o.y, w = o.w, h = o.h;
-  const yBot = y + h;
+  const x=o.x, y=o.y, w=o.w, h=o.h;
+  const deckY = y + h;
 
-  // proportions
-  const bodyR = Math.min(8, Math.floor(w * 0.35));
-  const bodyH = h - 14;                 // leave room for legs/feet
-  const cx = x + w/2;
+  // If you set o.variant = "poly_round" in the spawner, you get the vertical poly tank.
+  if (o.variant === "poly_round") {
+    // ---------- POLY ROUND (vertical, domed top, full-width base contact) ----------
+    const padX   = 6;                                  // small side inset
+    const tankW  = Math.max(42, w - padX*2);           // overall width of the tank
+    const tankH  = Math.max(36, h - 2);                // make it “thick” and seated on deck
+    const left   = x + (w - tankW)/2;
+    const right  = left + tankW;
+    const topY   = deckY - tankH;
+    const cx     = (left + right) / 2;
 
-  // ---- 1) Deck contact: tar pads + feet/plates ----
-  const legW = Math.max(3, Math.floor(w * 0.10));
-  const legH = Math.max(12, Math.floor(h * 0.20));
-  const footW = Math.max(8, Math.floor(w * 0.28));
-  const footH = 3;
+    // Dome height (rounded top); tweak for more/less bulge
+    const domeH  = Math.max(10, Math.floor(tankH * 0.28));
 
-  const legLX = x + 5;
-  const legRX = x + w - 5 - legW;
-  const legTop = yBot - legH;
+    // Silhouette (flat base → vertical sides → elliptical dome)
+    const P = new Path2D();
+    P.moveTo(left,  deckY);
+    P.lineTo(right, deckY);
+    P.lineTo(right, topY + domeH);
+    P.ellipse(cx, topY + domeH, tankW/2, domeH, 0, 0, Math.PI, true); // top dome (right→left)
+    P.lineTo(left, deckY);
+    P.closePath();
 
-  // tar blobs
-  ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -40);
-  roundRect(ctx, legLX - 6, yBot - footH - 1, footW, footH, 2, true);
-  roundRect(ctx, legRX - 2, yBot - footH - 1, footW, footH, 2, true);
-  ctx.restore();
+    // Fill (poly-tank plastic feel)
+    const g = ctx.createLinearGradient(left, topY, left, deckY);
+    g.addColorStop(0.00, shade(PALETTE.obstacleFill, -18));
+    g.addColorStop(0.55, shade(PALETTE.obstacleFill,   8));
+    g.addColorStop(1.00, shade(PALETTE.obstacleFill, -22));
+    ctx.fillStyle = g;
+    ctx.fill(P);
 
-  // legs
-  const lg = ctx.createLinearGradient(0, legTop, 0, yBot);
-  lg.addColorStop(0, shade(PALETTE.obstacleFill, -22));
-  lg.addColorStop(1, shade(PALETTE.obstacleFill, -34));
-  ctx.fillStyle = lg;
-  roundRect(ctx, legLX, legTop, legW, legH, 2, true);
-  roundRect(ctx, legRX, legTop, legW, legH, 2, true);
+    // Panel/ring ribs (wide, evenly spaced)
+    (function ribs(){
+      const gap = Math.max(8, Math.floor(tankH * 0.16));
+      const start = topY + domeH + gap * 0.7;
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
+      ctx.lineWidth = 2;
+      for (let yy = start; yy <= deckY - 6; yy += gap) {
+        ctx.beginPath();
+        // follow curvature near the dome by shortening slightly as we go up
+        const shrink = Math.max(0, (topY + domeH + gap - yy) * 0.10);
+        ctx.moveTo(left  + 4 + shrink, yy);
+        ctx.lineTo(right - 4 - shrink, yy);
+        ctx.stroke();
+      }
+      ctx.restore();
+    })();
 
-  // foot plates
-  ctx.save();
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -18);
-  roundRect(ctx, legLX - 2, yBot - footH - 2, legW + 4, footH, 2, true);
-  roundRect(ctx, legRX - 2, yBot - footH - 2, legW + 4, footH, 2, true);
-  ctx.restore();
+    // Central roof rib (that ridge on top of many round poly tanks)
+    (function roofRidge(){
+      const ridgeW = Math.max(6, Math.floor(tankW * 0.08));
+      const ridgeH = Math.max(6, Math.floor(domeH * 0.55));
+      ctx.save();
+      ctx.fillStyle = shade(PALETTE.obstacleFill, -14);
+      roundRect(ctx, cx - ridgeW/2, (topY + domeH) - ridgeH, ridgeW, ridgeH, Math.min(3, ridgeW/2), true);
+      // tiny highlight
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = shade(PALETTE.obstacleFill, +24);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx - ridgeW*0.35, (topY + domeH) - ridgeH*0.65);
+      ctx.lineTo(cx + ridgeW*0.35, (topY + domeH) - ridgeH*0.65);
+      ctx.stroke();
+      ctx.restore();
+    })();
 
-  // light cross brace hint between legs
-  ctx.save();
-  ctx.globalAlpha = 0.45;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -16);
-  ctx.lineWidth = 1.4;
-  ctx.beginPath();
-  ctx.moveTo(legLX + legW/2, yBot - 2 - footH);
-  ctx.lineTo(legRX + legW/2, legTop + 4);
-  ctx.moveTo(legRX + legW/2, yBot - 2 - footH);
-  ctx.lineTo(legLX + legW/2, legTop + 4);
-  ctx.stroke();
-  ctx.restore();
+    // Base pad/shadow so it clearly “touches” all along the ground
+    (function basePad(){
+      const padH = 4;
+      const padInset = 8;
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = shade(PALETTE.obstacleOutline, -42);
+      roundRect(ctx, left + padInset, deckY - padH, tankW - padInset*2, padH, 2, true);
+      ctx.restore();
+    })();
 
-  // ---- 2) Tank body (cylindrical feel) ----
-  // curved side gradient (slightly brighter center)
-  const gBody = ctx.createLinearGradient(x, y, x + w, y);
-  gBody.addColorStop(0.0, shade(PALETTE.obstacleFill, -18));
-  gBody.addColorStop(0.5, shade(PALETTE.obstacleFill,  6));
-  gBody.addColorStop(1.0, shade(PALETTE.obstacleFill, -22));
+    // Soft vertical highlight
+    ctx.save();
+    ctx.globalAlpha = 0.10;
+    ctx.fillStyle = "#cfe6ff";
+    const hiW = Math.max(10, Math.floor(tankW * 0.22));
+    const hiX = left + Math.floor(tankW * 0.30);
+    roundRect(ctx, hiX, topY + domeH + 6, hiW, tankH - domeH - 12, 6, true);
+    ctx.restore();
+
+    // Neon outline for readability
+    neonStrokePath(ctx, PALETTE.obstacleOutline, 2.0, 6.0, 0.55, () => ctx.stroke(P));
+    return; // done with poly_round
+  }
+
+  // ---------- DRUM (horizontal on saddles) – unchanged from your version ----------
+  const sidePad = 6;
+  const standH  = Math.max(10, Math.floor(h * 0.30));
+  const bodyW   = Math.max(52, w - sidePad * 2);
+  const dia     = Math.max(26, Math.min(h - standH - 3, Math.floor(w * 0.56)));
+  const r       = dia / 2;
+
+  const bodyX = x + (w - bodyW) / 2;
+  const bodyY = deckY - standH - dia;
+
+  const saddleXs = (bodyW >= 110)
+    ? [bodyX + bodyW * 0.20, bodyX + bodyW * 0.50, bodyX + bodyW * 0.80]
+    : [bodyX + bodyW * 0.30, bodyX + bodyW * 0.70];
+
+  // Saddles/pads
+  (function saddles(){
+    const padCol   = shade(PALETTE.obstacleOutline, -42);
+    const legCol   = shade(PALETTE.obstacleOutline, -34);
+    const strapCol = shade(PALETTE.obstacleOutline, -30);
+
+    const padW   = Math.max(16, Math.floor(w * 0.18));
+    const legW   = Math.max(6, Math.floor(r * 0.60));
+    const wallW  = Math.max(3, Math.floor(legW * 0.28));
+    const strapH = Math.max(4, Math.floor(r * 0.35));
+    const seatY  = bodyY + dia - strapH - 1;
+
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = padCol;
+    for (const sx of saddleXs) roundRect(ctx, sx - padW/2, deckY - 4, padW, 4, 2, true);
+    ctx.restore();
+
+    ctx.save();
+    for (const sx of saddleXs){
+      ctx.fillStyle = legCol;
+      roundRect(ctx, sx - legW/2,        deckY - standH, wallW, standH, 2, true);
+      roundRect(ctx, sx + legW/2 - wallW,deckY - standH, wallW, standH, 2, true);
+      roundRect(ctx, sx - legW/2 + wallW, deckY - Math.max(6, Math.floor(standH*0.24)),
+                legW - wallW*2, Math.max(3, Math.floor(standH*0.16)), 2, true);
+
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = shade(PALETTE.obstacleOutline, -46);
+      ctx.beginPath();
+      const holeTop = deckY - Math.floor(standH*0.55);
+      ctx.moveTo(sx - legW*0.26, deckY - Math.floor(standH*0.28));
+      ctx.lineTo(sx,               holeTop);
+      ctx.lineTo(sx + legW*0.26, deckY - Math.floor(standH*0.28));
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = strapCol;
+      roundRect(ctx, sx - Math.floor(legW*0.75)/2, seatY, Math.floor(legW*0.75), strapH, strapH/2, true);
+    }
+    ctx.restore();
+  })();
+
+  // Drum body
+  const gBody = ctx.createLinearGradient(bodyX, bodyY, bodyX + bodyW, bodyY);
+  gBody.addColorStop(0.00, shade(PALETTE.obstacleFill, -16));
+  gBody.addColorStop(0.50, shade(PALETTE.obstacleFill,  +8));
+  gBody.addColorStop(1.00, shade(PALETTE.obstacleFill, -20));
   ctx.fillStyle = gBody;
-  roundRect(ctx, x, y, w, bodyH, bodyR, true);
+  roundRect(ctx, bodyX, bodyY, bodyW, dia, r, true);
 
-  // vertical wood staves (subtle)
+  // Bands along length
   ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -28);
-  ctx.lineWidth = 1;
-  for (let sx = x + 4; sx < x + w - 4; sx += 4.5){
-    ctx.beginPath();
-    ctx.moveTo(sx, y + 5);
-    ctx.lineTo(sx, y + bodyH - 5);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // steel hoops (bands)
-  ctx.save();
-  ctx.globalAlpha = 0.45;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -8);
+  ctx.globalAlpha = 0.30;
   ctx.lineWidth = 2;
-  const bands = 3;
-  for (let i = 0; i < bands; i++){
-    const yy = y + 10 + i * Math.max(10, Math.floor((bodyH - 22)/(bands-1 || 1)));
-    ctx.beginPath();
-    ctx.moveTo(x + 4, yy);
-    ctx.lineTo(x + w - 4, yy);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // base ring (just above legs)
-  const ringY = y + bodyH - 5;
-  const gRing = ctx.createLinearGradient(x, ringY, x, ringY + 6);
-  gRing.addColorStop(0, shade(PALETTE.obstacleFill, 12));
-  gRing.addColorStop(1, shade(PALETTE.obstacleFill, -14));
-  ctx.fillStyle = gRing;
-  roundRect(ctx, x + 2, ringY, w - 4, 6, 3, true);
-
-  // ---- 3) Top: rim ellipse + conical cap + hatch/vent ----
-  // top rim
-  ctx.save();
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -10);
-  ctx.beginPath();
-  ctx.ellipse(cx, y, w/2, Math.max(5, Math.floor(w/6)), 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // conical cap
-  const coneH = Math.min(18, Math.floor(w * 0.7));
-  ctx.save();
-  const gCone = ctx.createLinearGradient(cx, y - coneH, cx, y + 2);
-  gCone.addColorStop(0, shade(PALETTE.obstacleFill,  8));
-  gCone.addColorStop(1, shade(PALETTE.obstacleFill, -16));
-  ctx.fillStyle = gCone;
-  ctx.beginPath();
-  ctx.moveTo(cx - w*0.34, y);
-  ctx.lineTo(cx,           y - coneH);
-  ctx.lineTo(cx + w*0.34, y);
-  ctx.closePath();
-  ctx.fill();
-  // tiny spec
-  ctx.globalAlpha = 0.25;
-  ctx.strokeStyle = "rgba(200,230,255,0.75)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx - w*0.18, y - coneH*0.45);
-  ctx.lineTo(cx + w*0.18, y - coneH*0.45);
-  ctx.stroke();
-  ctx.restore();
-
-  // hatch + vent on the cap
-  ctx.save();
-  ctx.globalAlpha = 0.8;
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -20);
-  roundRect(ctx, cx - 4, y - coneH + 2, 8, 5, 2, true); // hatch
-  ctx.beginPath();
-  ctx.arc(cx + w*0.18, y - coneH*0.4, 2, 0, Math.PI*2);
-  ctx.fill();
-  ctx.restore();
-
-  // ---- 4) Ladder on the side ----
-  const ladderX = x + w - 6;
-  const ladderTop = y + 8;
-  const ladderBot = y + bodyH - 6;
-  ctx.save();
-  ctx.globalAlpha = 0.55;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -12);
-  ctx.lineWidth = 1;
-  // rails
-  ctx.beginPath();
-  ctx.moveTo(ladderX - 2, ladderTop);
-  ctx.lineTo(ladderX - 2, ladderBot);
-  ctx.moveTo(ladderX + 2, ladderTop);
-  ctx.lineTo(ladderX + 2, ladderBot);
-  ctx.stroke();
-  // rungs
-  for (let yy = ladderTop + 4; yy < ladderBot - 2; yy += 6){
-    ctx.beginPath();
-    ctx.moveTo(ladderX - 3, yy);
-    ctx.lineTo(ladderX + 3, yy);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  // ---- 5) Overflow/conduit (left side) ----
-  ctx.save();
-  ctx.globalAlpha = 0.5;
   ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
-  ctx.lineWidth = 1.6;
-  const px1 = x + 2.5, py1 = y + Math.floor(bodyH * 0.60);
-  ctx.beginPath();
-  ctx.moveTo(px1, py1);
-  ctx.quadraticCurveTo(px1 - 10, py1 + 2, px1 - 8, py1 + 14);
-  ctx.stroke();
+  const ringStep = Math.max(18, Math.floor(r * 1.1));
+  for (let xi = bodyX + r + ringStep; xi <= bodyX + bodyW - r - 6; xi += ringStep){
+    ctx.beginPath(); ctx.moveTo(xi, bodyY + 3); ctx.lineTo(xi, bodyY + dia - 3); ctx.stroke();
+  }
   ctx.restore();
 
-  // ---- 6) Soft highlights ----
-  // front highlight column
+  // Highlight band
   ctx.save();
   ctx.globalAlpha = 0.10;
   ctx.fillStyle = "#cfe6ff";
-  roundRect(ctx, x + Math.floor(w*0.22), y + 8, Math.max(8, Math.floor(w*0.30)), bodyH - 14, 3, true);
+  roundRect(ctx, bodyX + Math.floor(bodyW*0.25), bodyY + 6,
+            Math.max(10, Math.floor(bodyW*0.30)), dia - 12, 6, true);
   ctx.restore();
 
-  // ---- 7) Neon accents / hitbox readability ----
-  // main body neon
-  neonStrokePath(ctx, PALETTE.obstacleOutline, 2, 6, 0.55, () =>
-    roundRectPath(ctx, x, y, w, bodyH, bodyR)
-  );
+  // Manway on top
+  const manX = bodyX + bodyW * 0.56;
+  const manW = Math.max(10, Math.floor((dia/2) * 0.9));
+  const manH = Math.max(6,  Math.floor((dia/2) * 0.55));
+  const riserH = Math.max(4, Math.floor((dia/2) * 0.40));
+  ctx.save();
+  ctx.fillStyle = shade(PALETTE.obstacleFill, -14);
+  roundRect(ctx, manX - manW * 0.14, bodyY - riserH + 1, manW * 0.28, riserH, 2, true);
+  const gLid = ctx.createLinearGradient(0, bodyY - riserH - manH, 0, bodyY - riserH + 2);
+  gLid.addColorStop(0, shade(PALETTE.obstacleFill,  8));
+  gLid.addColorStop(1, shade(PALETTE.obstacleFill, -12));
+  ctx.fillStyle = gLid;
+  roundRect(ctx, manX - manW/2, bodyY - riserH - manH, manW, manH, Math.min(6, manH/2), true);
+  ctx.restore();
 
-  // faint neon around top rim ellipse
-  neonStrokePath(ctx, PALETTE.obstacleOutline, 1.4, 4, 0.45, () => {
-    ctx.beginPath();
-    ctx.ellipse(cx, y, w/2, Math.max(5, Math.floor(w/6)), 0, 0, Math.PI * 2);
-  });
+  // End ladder (nudged right, down to deck)
+  (function endLadder(){
+    const r = dia/2, railGap = Math.max(6, Math.floor(r * 0.32));
+    const margin  = Math.max(2, Math.floor(r * 0.10));
+    const nudge   = 4;
+    const railL = bodyX + margin + 1 + nudge, railR = railL + railGap;
+    const top = bodyY + Math.max(4, Math.floor(r * 0.10)), bot = deckY - 3;
 
-  // subtle neon on ladder rails (adds depth but doesn’t compete)
-  neonStrokePath(ctx, shade(PALETTE.obstacleOutline, -8), 1.2, 3.0, 0.40, () => {
-    ctx.beginPath();
-    ctx.moveTo(ladderX - 2, ladderTop);
-    ctx.lineTo(ladderX - 2, ladderBot);
-    ctx.moveTo(ladderX + 2, ladderTop);
-    ctx.lineTo(ladderX + 2, ladderBot);
+    ctx.save();
+    ctx.globalAlpha = 0.70;
+    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(railL, top); ctx.lineTo(railL, bot);
+    ctx.moveTo(railR, top); ctx.lineTo(railR, bot); ctx.stroke();
+    for (let yy = top + 5; yy <= bot - 6; yy += 6){
+      ctx.beginPath(); ctx.moveTo(railL + 1, yy); ctx.lineTo(railR - 1, yy); ctx.stroke();
+    }
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = shade(PALETTE.obstacleOutline, -42);
+    roundRect(ctx, railL - 3, deckY - 4, 6, 4, 2, true);
+    roundRect(ctx, railR - 3, deckY - 4, 6, 4, 2, true);
+    ctx.restore();
+  })();
+
+  // Neon outline
+  neonStrokePath(ctx, PALETTE.obstacleOutline, 2.0, 6.0, 0.55, () => {
+    roundRectPath(ctx, bodyX, bodyY, bodyW, dia, r);
   });
 }
 
 function drawBillboard(ctx, o, t){
   const x = o.x, y = o.y, w = o.w, h = o.h;
-  const contactY = y + h;                 // deck line at bottom of hitbox
+  const contactY = y + h;
 
   // geometry
   const faceR = 4;
   const legW = Math.max(4, Math.floor(w * 0.035));
   const legH = Math.max(10, Math.floor(h * 0.22));
-  const faceH = h - legH - 6;             // leave room for legs + catwalk
+  const faceH = h - legH - 6;
   const faceY = y;
   const faceW = w;
   const faceX = x;
@@ -1430,7 +1743,6 @@ function drawBillboard(ctx, o, t){
   const legTop = y + faceH + 2;
 
   // -------------------- BASE / LEGS --------------------
-  // tar pads under legs (NYC torch-down blobs)
   ctx.save();
   ctx.globalAlpha = 0.9;
   ctx.fillStyle   = shade(PALETTE.obstacleOutline, -40);
@@ -1438,14 +1750,13 @@ function drawBillboard(ctx, o, t){
   roundRect(ctx, legRX - 6, contactY - 3, Math.max(18, legW + 12), 3, 2, true);
   ctx.restore();
 
-  // legs (fake I-beam: side flanges brighter, web darker)
   const lg = ctx.createLinearGradient(0, legTop, 0, contactY);
   lg.addColorStop(0, shade(PALETTE.obstacleFill, -18));
   lg.addColorStop(1, shade(PALETTE.obstacleFill, -30));
   ctx.fillStyle = lg;
   roundRect(ctx, legLX, legTop, legW, legH, 2, true);
   roundRect(ctx, legRX, legTop, legW, legH, 2, true);
-  // web lines
+
   ctx.save();
   ctx.globalAlpha = 0.45;
   ctx.strokeStyle = shade(PALETTE.obstacleOutline, -16);
@@ -1456,7 +1767,6 @@ function drawBillboard(ctx, o, t){
   ctx.beginPath(); ctx.moveTo(webX2, legTop + 1); ctx.lineTo(webX2, contactY - 4); ctx.stroke();
   ctx.restore();
 
-  // cross braces between legs
   ctx.save();
   ctx.globalAlpha = 0.55;
   ctx.strokeStyle = shade(PALETTE.obstacleOutline, -12);
@@ -1474,14 +1784,12 @@ function drawBillboard(ctx, o, t){
   const walkH = 6;
   const railH = 8;
 
-  // platform slab
   const gWalk = ctx.createLinearGradient(x, walkY, x, walkY + walkH);
   gWalk.addColorStop(0, shade(PALETTE.obstacleFill,  6));
   gWalk.addColorStop(1, shade(PALETTE.obstacleFill, -14));
   ctx.fillStyle = gWalk;
   roundRect(ctx, x + 4, walkY, w - 8, walkH, 3, true);
 
-  // grating lines
   ctx.save();
   ctx.globalAlpha = 0.25;
   ctx.strokeStyle = shade(PALETTE.obstacleOutline, -18);
@@ -1491,7 +1799,6 @@ function drawBillboard(ctx, o, t){
   }
   ctx.restore();
 
-  // railing posts + top rail
   ctx.save();
   ctx.globalAlpha = 0.6;
   ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
@@ -1506,80 +1813,199 @@ function drawBillboard(ctx, o, t){
   ctx.stroke();
   ctx.restore();
 
-  // -------------------- FACE / SKIN --------------------
-  // panel frame
+  // -------------------- FACE / SKIN (variants) --------------------
   const frameInset = 2;
   const faceInnerX = faceX + frameInset;
   const faceInnerY = faceY + frameInset;
   const faceInnerW = faceW - frameInset*2;
   const faceInnerH = faceH - frameInset*2;
 
-  // outer frame
+  // outer frame (unchanged)
   const gFrame = ctx.createLinearGradient(faceX, faceY, faceX, faceY + faceH);
   gFrame.addColorStop(0, shade(PALETTE.obstacleFill, -8));
   gFrame.addColorStop(1, shade(PALETTE.obstacleFill, -22));
   ctx.fillStyle = gFrame;
   roundRect(ctx, faceX, faceY, faceW, faceH, faceR, true);
 
-  // inner panel (paper/mesh)
-  const gFace = ctx.createLinearGradient(faceInnerX, faceInnerY, faceInnerX, faceInnerY + faceInnerH);
-  gFace.addColorStop(0, "#16243f");
-  gFace.addColorStop(0.55, "#0f1a33");
-  gFace.addColorStop(1, "#0b1326");
-  ctx.fillStyle = gFace;
-  roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+  // pick once & remember
+  const variant = o.variant || (o.variant = pickWeighted([
+    ["classic", 5],
+    ["slats",   4],
+    ["led",     3],
+    ["wood",    3],
+  ]));
 
-  // perimeter bolts
-  ctx.save();
-  ctx.globalAlpha = 0.5;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -14);
-  const boltPad = 6, boltStep = Math.max(18, Math.floor(faceW / 6));
-  for (let bx = faceX + boltPad; bx <= faceX + faceW - boltPad; bx += boltStep){
-    ctx.fillRect(bx - 1, faceY + 2, 2, 2);
-    ctx.fillRect(bx - 1, faceY + faceH - 4, 2, 2);
+  // helper to round-rect clip to inner panel
+  function clipInner(){
+    const p = new Path2D();
+    p.roundRect(faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1));
+    ctx.clip(p);
   }
-  for (let by = faceY + boltPad; by <= faceY + faceH - boltPad; by += 16){
-    ctx.fillRect(faceX + 2,                 by - 1, 2, 2);
-    ctx.fillRect(faceX + faceW - 4,         by - 1, 2, 2);
+
+  if (variant === "slats"){
+    // Tri-vision style: vertical slats with light/dark faces
+    const bg = ctx.createLinearGradient(faceInnerX, faceInnerY, faceInnerX, faceInnerY + faceInnerH);
+    bg.addColorStop(0, "#0f1a32");
+    bg.addColorStop(1, "#0b1224");
+    ctx.fillStyle = bg;
+    roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+
+    const slatW = Math.max(8, Math.floor(faceInnerW / 10));
+    ctx.save(); clipInner();
+    for (let sx = faceInnerX + 4; sx < faceInnerX + faceInnerW - 4; sx += slatW){
+      const g = ctx.createLinearGradient(sx, 0, sx + slatW, 0);
+      g.addColorStop(0.00, shade(PALETTE.obstacleFill, -26));
+      g.addColorStop(0.45, shade(PALETTE.obstacleFill, +4));
+      g.addColorStop(0.55, shade(PALETTE.obstacleFill, +6));
+      g.addColorStop(1.00, shade(PALETTE.obstacleFill, -24));
+      ctx.fillStyle = g;
+      roundRect(ctx, sx + 1, faceInnerY + 3, slatW - 3, faceInnerH - 6, 2, true);
+
+      // thin side bevel lines
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -14);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(sx + 1.5, faceInnerY + 4);
+      ctx.lineTo(sx + 1.5, faceInnerY + faceInnerH - 4);
+      ctx.moveTo(sx + slatW - 2.5, faceInnerY + 4);
+      ctx.lineTo(sx + slatW - 2.5, faceInnerY + faceInnerH - 4);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+
+  } else if (variant === "led"){
+    // LED matrix look
+    ctx.fillStyle = "#0b1326";
+    roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+
+    // pixel grid
+    ctx.save(); clipInner();
+    const step = 6;
+    const rad = 1.2;
+    for (let yy = faceInnerY + 3; yy <= faceInnerY + faceInnerH - 3; yy += step){
+      for (let xx = faceInnerX + 3; xx <= faceInnerX + faceInnerW - 3; xx += step){
+        const flick = 0.75 + 0.25 * Math.sin(((t||0)*3) + xx*0.04 + yy*0.03);
+        ctx.fillStyle = `rgba(160,210,255,${0.08 * flick})`;
+        ctx.beginPath(); ctx.arc(xx, yy, rad, 0, Math.PI*2); ctx.fill();
+      }
+    }
+    // scanline
+    const scan = (performance.now() * 0.12) % (faceInnerH - 2);
+    ctx.fillStyle = "rgba(90,176,255,0.20)";
+    ctx.fillRect(faceInnerX + 2, faceInnerY + 1 + scan, faceInnerW - 4, 3);
+    ctx.restore();
+
+    // subtle bezel inside
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -18);
+    ctx.lineWidth = 1;
+    roundRect(ctx, faceInnerX + 1, faceInnerY + 1, faceInnerW - 2, faceInnerH - 2, Math.max(1, faceR-2), false);
+    ctx.globalAlpha = 1;
+
+  } else if (variant === "wood"){
+    // Weathered planks
+    const plankH = Math.max(10, Math.floor(faceInnerH / 6));
+    ctx.save();
+    clipInner();
+    for (let py = faceInnerY; py < faceInnerY + faceInnerH; py += plankH){
+      const g = ctx.createLinearGradient(0, py, 0, py + plankH);
+      g.addColorStop(0, shade(PALETTE.obstacleFill, -14));
+      g.addColorStop(1, shade(PALETTE.obstacleFill, -24));
+      ctx.fillStyle = g;
+      ctx.fillRect(faceInnerX, py, faceInnerW, plankH - 1);
+
+      // grain and nails
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(faceInnerX + 8, py + plankH*0.4);
+      ctx.lineTo(faceInnerX + faceInnerW - 8, py + plankH*0.6);
+      ctx.stroke();
+      ctx.globalAlpha = 0.6;
+      for (let bx = faceInnerX + 10; bx < faceInnerX + faceInnerW - 8; bx += 38){
+        ctx.fillStyle = shade(PALETTE.obstacleOutline, -16);
+        ctx.fillRect(bx, py + 3, 1, 1);
+        ctx.fillRect(bx + 14, py + plankH - 5, 1, 1);
+      }
+      ctx.globalAlpha = 1;
+    }
+    // one missing plank (rare)
+    if (Math.random() < 0.25){
+      const row = Math.floor((faceInnerH / plankH) * 0.5) * plankH;
+      ctx.clearRect(faceInnerX + 12, faceInnerY + row + 2, faceInnerW - 24, plankH - 4);
+    }
+    ctx.restore();
+
+    // inner shadow/vignette
+    ctx.save();
+    const vg = ctx.createRadialGradient(faceInnerX, faceInnerY, 0, faceInnerX, faceInnerY, Math.max(faceInnerW, faceInnerH));
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.22)");
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = vg;
+    roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+    ctx.restore();
+
+  } else {
+    // ------- classic (your original face) -------
+    const gFace = ctx.createLinearGradient(faceInnerX, faceInnerY, faceInnerX, faceInnerY + faceInnerH);
+    gFace.addColorStop(0, "#16243f");
+    gFace.addColorStop(0.55, "#0f1a33");
+    gFace.addColorStop(1, "#0b1326");
+    ctx.fillStyle = gFace;
+    roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = shade(PALETTE.obstacleOutline, -14);
+    const boltPad = 6, boltStep = Math.max(18, Math.floor(faceW / 6));
+    for (let bx = faceX + boltPad; bx <= faceX + faceW - boltPad; bx += boltStep){
+      ctx.fillRect(bx - 1, faceY + 2, 2, 2);
+      ctx.fillRect(bx - 1, faceY + faceH - 4, 2, 2);
+    }
+    for (let by = faceY + boltPad; by <= faceY + faceH - boltPad; by += 16){
+      ctx.fillRect(faceX + 2,                 by - 1, 2, 2);
+      ctx.fillRect(faceX + faceW - 4,         by - 1, 2, 2);
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = "#253a66";
+    ctx.lineWidth = 1;
+    for (let sx = faceInnerX + 12; sx < faceInnerX + faceInnerW - 12; sx += 16){
+      ctx.beginPath(); ctx.moveTo(sx, faceInnerY + 6); ctx.lineTo(sx, faceInnerY + faceInnerH - 6); ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.save();
+    const vg = ctx.createRadialGradient(faceInnerX, faceInnerY, 0, faceInnerX, faceInnerY, Math.max(faceInnerW, faceInnerH));
+    vg.addColorStop(0, "rgba(0,0,0,0)");
+    vg.addColorStop(1, "rgba(0,0,0,0.25)");
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = vg;
+    roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalAlpha = 0.14;
+    ctx.strokeStyle = "#2a3a60";
+    ctx.beginPath();
+    ctx.moveTo(faceInnerX + 6, faceInnerY + 6);
+    ctx.lineTo(faceInnerX + faceInnerW - 6, faceInnerY + faceInnerH - 6);
+    ctx.moveTo(faceInnerX + faceInnerW - 6, faceInnerY + 6);
+    ctx.lineTo(faceInnerX + 6, faceInnerY + faceInnerH - 6);
+    ctx.stroke();
+    ctx.restore();
+
+    // subtle scanline like before
+    const scan = (performance.now() * 0.12) % (faceInnerH - 2);
+    ctx.fillStyle = "rgba(90,176,255,0.18)";
+    ctx.fillRect(faceInnerX + 2, faceInnerY + 1 + scan, faceInnerW - 4, 3);
   }
-  ctx.restore();
-
-  // paper seams/tears (vertical)
-  ctx.save();
-  ctx.globalAlpha = 0.18;
-  ctx.strokeStyle = "#253a66";
-  ctx.lineWidth = 1;
-  for (let sx = faceInnerX + 12; sx < faceInnerX + faceInnerW - 12; sx += 16){
-    ctx.beginPath(); ctx.moveTo(sx, faceInnerY + 6); ctx.lineTo(sx, faceInnerY + faceInnerH - 6); ctx.stroke();
-  }
-  ctx.restore();
-
-  // vignette corners (helps depth)
-  ctx.save();
-  const vg = ctx.createRadialGradient(faceInnerX, faceInnerY, 0, faceInnerX, faceInnerY, Math.max(faceInnerW, faceInnerH));
-  vg.addColorStop(0, "rgba(0,0,0,0)");
-  vg.addColorStop(1, "rgba(0,0,0,0.25)");
-  ctx.globalCompositeOperation = "multiply";
-  ctx.fillStyle = vg;
-  roundRect(ctx, faceInnerX, faceInnerY, faceInnerW, faceInnerH, Math.max(2, faceR-1), true);
-  ctx.restore();
-
-  // crossing brace shadow hint behind paper
-  ctx.save();
-  ctx.globalAlpha = 0.14;
-  ctx.strokeStyle = "#2a3a60";
-  ctx.beginPath();
-  ctx.moveTo(faceInnerX + 6, faceInnerY + 6);
-  ctx.lineTo(faceInnerX + faceInnerW - 6, faceInnerY + faceInnerH - 6);
-  ctx.moveTo(faceInnerX + faceInnerW - 6, faceInnerY + 6);
-  ctx.lineTo(faceInnerX + 6, faceInnerY + faceInnerH - 6);
-  ctx.stroke();
-  ctx.restore();
-
-  // animated scanline (kept from your original)
-  const scan = (performance.now() * 0.12) % (faceInnerH - 2);
-  ctx.fillStyle = "rgba(90,176,255,0.18)";
-  ctx.fillRect(faceInnerX + 2, faceInnerY + 1 + scan, faceInnerW - 4, 3);
 
   // -------------------- TOP LAMPS --------------------
   const lampCount = Math.max(2, Math.floor(w / 60));
@@ -1587,22 +2013,21 @@ function drawBillboard(ctx, o, t){
     const u = (i + 0.5) / lampCount;
     const lx = Math.floor(faceX + 10 + u * (faceW - 20));
     const ly = faceY - 4;
-    // head
     ctx.save();
     ctx.fillStyle = shade(PALETTE.obstacleFill, -8);
     ctx.beginPath(); ctx.arc(lx, ly, 2, 0, Math.PI*2); ctx.fill();
-    // arm
+
     ctx.globalAlpha = 0.65;
     ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx, ly + 6); ctx.stroke();
-    // cone of light
+
     const flicker = 0.7 + 0.3 * Math.sin((t || 0) * 6 + i*1.7);
     ctx.globalCompositeOperation = "lighter";
-    const lg = ctx.createRadialGradient(lx, ly + 8, 0, lx, ly + 8, 40);
-    lg.addColorStop(0, `rgba(160,210,255,${0.20 * flicker})`);
-    lg.addColorStop(1, "rgba(160,210,255,0.00)");
-    ctx.fillStyle = lg;
+    const lg2 = ctx.createRadialGradient(lx, ly + 8, 0, lx, ly + 8, 40);
+    lg2.addColorStop(0, `rgba(160,210,255,${0.20 * flicker})`);
+    lg2.addColorStop(1, "rgba(160,210,255,0.00)");
+    ctx.fillStyle = lg2;
     ctx.beginPath();
     ctx.moveTo(lx - 20, ly + 6);
     ctx.lineTo(lx + 20, ly + 6);
@@ -1614,12 +2039,10 @@ function drawBillboard(ctx, o, t){
   }
 
   // -------------------- NEON / READABILITY --------------------
-  // face neon (primary)
   neonStrokePath(ctx, PALETTE.obstacleOutline, 2, 6, 0.55, () =>
     roundRectPath(ctx, faceX, faceY, faceW, faceH, faceR)
   );
 
-  // post accents (subtle) – and ensure they "kiss" the deck
   const postLX = Math.round(legLX) + 0.5;
   const postRX = Math.round(legRX + legW) - 0.5;
   neonStrokePath(ctx, PALETTE.obstacleOutline, 1.4, 4, 0.45, () => {
@@ -1628,7 +2051,6 @@ function drawBillboard(ctx, o, t){
     ctx.moveTo(postRX, legTop);  ctx.lineTo(postRX, contactY + 2.5);
   });
 
-  // tiny deck stitches at post feet (avoid micro-gaps on some DPRs)
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
   ctx.strokeStyle = PALETTE.obstacleOutline;
@@ -1813,7 +2235,7 @@ function drawWaterTowerGate(ctx, o, P){
   }
   ctx.restore();
 
-  // 6) LOW “DUCK” BAR — the ONLY neon part
+  // 6) LOW “DUCK” BAR — unchanged (with neon)
   const innerL = xL + legW + 2;
   const innerR = xR - 2;
   const barW   = Math.max(20, innerR - innerL);
@@ -1839,121 +2261,249 @@ function drawWaterTowerGate(ctx, o, P){
   }
   ctx.restore();
 
-  // neon outline (duck!)
   neonStrokePath(ctx, P.obstacleOutline, 1.6, 4, 0.55,
     () => roundRectPath(ctx, barX, beamY, barW, beamH, 3)
   );
+
+  // 7) Tower silhouette neon (ABOVE duck bar only; no big rectangle)
+  (function towerSilhouetteNeon(){
+    const glowW = 4.5, glowA = 0.50, thick = 1.6;
+
+    ctx.save();
+    // Clip to area above the duck bar so the lower “duckable” look stays untouched
+    ctx.beginPath();
+    ctx.rect(o.x - 4, -9999, o.w + 8, Math.max(0, beamY + 2 + 9999));
+    ctx.clip();
+
+    // left leg
+    neonStrokePath(ctx, P.obstacleOutline, thick, glowW, glowA, () =>
+      roundRectPath(ctx, xL, baseY - legH, legW, legH, 2)
+    );
+
+    // right leg
+    neonStrokePath(ctx, P.obstacleOutline, thick, glowW, glowA, () =>
+      roundRectPath(ctx, xR, baseY - legH, legW, legH, 2)
+    );
+
+    // platform slab edge
+    neonStrokePath(ctx, P.obstacleOutline, thick, glowW, glowA, () =>
+      roundRectPath(ctx, slabX, platformY - tankPad, slabW, tankPad, 3)
+    );
+
+    // tank box (rounded)
+    neonStrokePath(ctx, P.obstacleOutline, thick, glowW, glowA, () =>
+      roundRectPath(ctx, tx, tankY, tw, o.tankH, 6)
+    );
+
+    ctx.restore();
+  })();
 }
 
 function drawWire(ctx, o){
   const x1 = o.x, x2 = o.x + o.w;
-  const y  = o.y;                        // wire anchor height (highest point of the span)
+  const y  = o.y;                        // wire anchor (highest point of span)
   const sag = o.sag || 14;
-  const deckY = (o.baseY ?? (y + 44));   // roof line fallback if baseY not provided
-
+  const deckY = (o.baseY ?? (y + 44));
   const cx = (x1 + x2) / 2;
   const cy = y + sag;
 
-  // ----- helper: visual (non-colliding, non-neon) drop-leg pole -----
-  const drawDropPole = (px, side /* -1 left, +1 right */) => {
+  // ---- pick/capture a pole look once (no A_frame) ----
+  if (o.poleVariant == null) {
+    o.poleVariant = pickWeighted([
+      ["pipe_arm",    4],  // baseline
+      ["cantilever",  3],  // angled arm, compact (visibility+)
+      ["stub_gantry", 3],  // short post with U-yoke (visibility+)
+    ]);
+  }
+  const poleVariant = o.poleVariant;
+
+  // ----- helper: visual (non-colliding) drop-leg pole variants -----
+  const drawDropPole = (px, side /* -1 left, +1 right */, variant) => {
+    // shared numbers
     const padH  = 3;
-    const poleW = 8;
+    const overTop = 14;               // how much higher than wire the pole top sits
+    const topY = y - overTop;         // smaller Y = visually higher
 
-    // Make the pole just a hair taller than the wire’s highest point (y).
-    // Scale a touch with span width but clamp to a sensible range.
-    const overTop = Math.max(14, Math.min(6, Math.round(o.w * 0.02))); // 3–6 px above the wire
-    const topY = y - overTop;            // smaller Y = visually higher
-    const armW = 18, armH = 4;
-    const armY = topY + 2;               // crossarm just under the top
-    const armX = px - armW/2;
-
-    // tar pad on deck
+    // tar pad (common)
     ctx.save();
     ctx.globalAlpha = 0.9;
     ctx.fillStyle = shade(PALETTE.obstacleOutline, -40);
     roundRect(ctx, px - 10, deckY - padH, 20, padH, 2, true);
     ctx.restore();
 
-    // pole shaft (matte, non-neon)
-    const gPole = ctx.createLinearGradient(px, topY, px, deckY);
-    gPole.addColorStop(0, shade(PALETTE.obstacleFill, -10));
-    gPole.addColorStop(0.5, PALETTE.obstacleFill);
-    gPole.addColorStop(1, shade(PALETTE.obstacleFill, -26));
-    ctx.fillStyle = gPole;
-    roundRect(ctx, px - poleW/2, topY, poleW, deckY - topY, 3, true);
+    if (variant === "pipe_arm") {
+      // ========== Baseline pipe post w/ short crossarm ==========
+      const poleW = 8;
+      const armW = 18, armH = 4;
+      const armY = topY + 2, armX = px - armW/2;
 
-    // bands + tiny bolts
-    ctx.save();
-    ctx.globalAlpha = 0.55;
-    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -14);
-    ctx.lineWidth = 1;
-    const b1 = armY + 6, b2 = deckY - 10;
-    [b1, b2].forEach(by => {
-      ctx.beginPath(); ctx.moveTo(px - poleW/2 + 1.5, by); ctx.lineTo(px + poleW/2 - 1.5, by); ctx.stroke();
-    });
-    ctx.globalAlpha = 0.65;
-    ctx.fillStyle = shade(PALETTE.obstacleOutline, -10);
-    ctx.fillRect(px - 1, b1 - 1, 2, 2);
-    ctx.fillRect(px - 1, b2 - 1, 2, 2);
-    ctx.restore();
+      // pole shaft
+      const gPole = ctx.createLinearGradient(px, topY, px, deckY);
+      gPole.addColorStop(0, shade(PALETTE.obstacleFill, -10));
+      gPole.addColorStop(0.5, PALETTE.obstacleFill);
+      gPole.addColorStop(1, shade(PALETTE.obstacleFill, -26));
+      ctx.fillStyle = gPole;
+      roundRect(ctx, px - poleW/2, topY, poleW, deckY - topY, 3, true);
 
-    // crossarm (no neon)
-    const gArm = ctx.createLinearGradient(armX, armY, armX, armY + armH);
-    gArm.addColorStop(0, shade(PALETTE.obstacleFill, 10));
-    gArm.addColorStop(1, shade(PALETTE.obstacleFill, -16));
-    ctx.fillStyle = gArm;
-    roundRect(ctx, armX, armY, armW, armH, 2, true);
+      // bands
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -14);
+      ctx.lineWidth = 1;
+      [armY + 6, deckY - 10].forEach(by => {
+        ctx.beginPath(); ctx.moveTo(px - poleW/2 + 1.5, by); ctx.lineTo(px + poleW/2 - 1.5, by); ctx.stroke();
+      });
+      ctx.restore();
 
-    // diagonal brace
-    ctx.save();
-    ctx.globalAlpha = 0.7;
-    ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(px, armY + armH);
-    ctx.lineTo(px + side * (armW * 0.35), armY + armH + 6);
-    ctx.stroke();
-    ctx.restore();
+      // crossarm
+      const gArm = ctx.createLinearGradient(armX, armY, armX, armY + armH);
+      gArm.addColorStop(0, shade(PALETTE.obstacleFill, 10));
+      gArm.addColorStop(1, shade(PALETTE.obstacleFill, -16));
+      ctx.fillStyle = gArm;
+      roundRect(ctx, armX, armY, armW, armH, 2, true);
 
-    // insulator puck on outer half + matte jumper into the wire anchor
-    const insX = px + side * (armW * 0.38);
-    const insY = armY + armH/2;
+      // brace
+      ctx.save();
+      ctx.globalAlpha = 0.7;
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -10);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, armY + armH);
+      ctx.lineTo(px + side * (armW * 0.35), armY + armH + 6);
+      ctx.stroke();
+      ctx.restore();
 
-    ctx.save();
-    const g = ctx.createLinearGradient(insX - 4, insY - 3, insX + 4, insY + 3);
-    g.addColorStop(0, shade(PALETTE.obstacleFill, 14));
-    g.addColorStop(1, shade(PALETTE.obstacleFill, -8));
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.ellipse(insX, insY, 3.6, 2.4, 0, 0, Math.PI*2); ctx.fill();
-    ctx.globalAlpha = 0.85;
-    ctx.fillStyle = shade(PALETTE.obstacleOutline, -10);
-    ctx.fillRect(insX - 0.6, insY - 1.6, 1.2, 3.2);
-    ctx.restore();
+      // insulator puck
+      const insX = px + side * (armW * 0.38);
+      const insY = armY + armH/2;
+      ctx.save();
+      const g = ctx.createLinearGradient(insX - 4, insY - 3, insX + 4, insY + 3);
+      g.addColorStop(0, shade(PALETTE.obstacleFill, 14));
+      g.addColorStop(1, shade(PALETTE.obstacleFill, -8));
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.ellipse(insX, insY, 3.6, 2.4, 0, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = shade(PALETTE.obstacleOutline, -10);
+      ctx.fillRect(insX - 0.6, insY - 1.6, 1.2, 3.2);
+      ctx.restore();
 
-    ctx.save();
-    ctx.globalAlpha = 0.65;
-    ctx.strokeStyle = PALETTE.wireCore;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(insX, insY);
-    const jcx = insX + side * 10;
-    const targetX = side < 0 ? (x1 + 1) : (x2 - 1);
-    ctx.quadraticCurveTo(jcx, insY + 8, targetX, y + 1);
-    ctx.stroke();
-    ctx.restore();
+      // jumper to the wire
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = PALETTE.wireCore;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(insX, insY);
+      const jcx = insX + side * 10;
+      const targetX = side < 0 ? (x1 + 1) : (x2 - 1);
+      ctx.quadraticCurveTo(jcx, insY + 8, targetX, y + 1);
+      ctx.stroke();
+      ctx.restore();
 
-    // soft highlight on pole (still non-neon)
-    ctx.save();
-    ctx.globalAlpha = 0.12;
-    ctx.fillStyle = "#cfe6ff";
-    roundRect(ctx, px - poleW/2 + 1, topY + 6, 3, Math.max(12, deckY - topY - 12), 2, true);
-    ctx.restore();
+      // subtle highlight
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = "#cfe6ff";
+      roundRect(ctx, px - poleW/2 + 1, topY + 6, 3, Math.max(12, deckY - topY - 12), 2, true);
+      ctx.restore();
+
+    } else if (variant === "cantilever") {
+      // ========== Compact cantilever bracket on a slim post ==========
+      const poleW = 6;
+      const postH = deckY - topY;
+      const armLen = 16, armTh = 3;
+
+      // slim post
+      const gp = ctx.createLinearGradient(px, topY, px, deckY);
+      gp.addColorStop(0, shade(PALETTE.obstacleFill, -8));
+      gp.addColorStop(1, shade(PALETTE.obstacleFill, -24));
+      ctx.fillStyle = gp;
+      roundRect(ctx, px - poleW/2, topY, poleW, postH, 2, true);
+
+      // angled cantilever arm
+      const ax0 = px, ay0 = topY + 3;
+      const ax1 = px + side * armLen, ay1 = ay0 + 6;
+      ctx.save();
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -12);
+      ctx.lineWidth = armTh;
+      ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(ax0, ay0); ctx.lineTo(ax1, ay1); ctx.stroke();
+      ctx.restore();
+
+      // small clamp/insulator at the tip
+      const insX = ax1, insY = ay1;
+      ctx.save();
+      ctx.fillStyle = shade(PALETTE.obstacleFill, -6);
+      ctx.beginPath(); ctx.arc(insX, insY, 2.6, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+
+      // jumper
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = PALETTE.wireCore;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(insX, insY);
+      const jcx = insX + side * 10;
+      const targetX = side < 0 ? (x1 + 1) : (x2 - 1);
+      ctx.quadraticCurveTo(jcx, insY + 8, targetX, y + 1);
+      ctx.stroke();
+      ctx.restore();
+
+    } else { // "stub_gantry"
+      // ========== Short post with U-yoke (twin insulators) ==========
+      const postW = 7;
+      const postH = Math.max(18, deckY - topY - 4);
+      const yokeW = 16, yokeH = 8;
+
+      // post
+      const gPost = ctx.createLinearGradient(px, topY, px, deckY);
+      gPost.addColorStop(0, shade(PALETTE.obstacleFill, -8));
+      gPost.addColorStop(1, shade(PALETTE.obstacleFill, -24));
+      ctx.fillStyle = gPost;
+      roundRect(ctx, px - postW/2, topY + 4, postW, postH, 2, true);
+
+      // U-yoke on the outer side
+      const ux = px + side * (postW/2 + 1.5);
+      const uy = topY + 6;
+      ctx.save();
+      ctx.strokeStyle = shade(PALETTE.obstacleOutline, -12);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(ux, uy);
+      ctx.lineTo(ux + side * (yokeW * 0.6), uy + yokeH/2);
+      ctx.lineTo(ux, uy + yokeH);
+      ctx.stroke();
+      ctx.restore();
+
+      // two small insulators along the yoke
+      const ins1X = ux + side * (yokeW * 0.32), ins1Y = uy + yokeH*0.28;
+      const ins2X = ux + side * (yokeW * 0.52), ins2Y = uy + yokeH*0.58;
+      ctx.save();
+      ctx.fillStyle = shade(PALETTE.obstacleFill, -6);
+      ctx.beginPath(); ctx.arc(ins1X, ins1Y, 2.4, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(ins2X, ins2Y, 2.4, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+
+      // jumper from the outer insulator
+      ctx.save();
+      ctx.globalAlpha = 0.65;
+      ctx.strokeStyle = PALETTE.wireCore;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(ins2X, ins2Y);
+      const jcx = ins2X + side * 10;
+      const targetX = side < 0 ? (x1 + 1) : (x2 - 1);
+      ctx.quadraticCurveTo(jcx, ins2Y + 8, targetX, y + 1);
+      ctx.stroke();
+      ctx.restore();
+    }
   };
 
   // place drop-legs slightly outside the span so silhouettes read
   const offset = Math.max(8, Math.min(14, Math.floor(o.w * 0.035)));
-  drawDropPole(x1 - offset, -1);
-  drawDropPole(x2 + offset,  1);
+  drawDropPole(x1 - offset, -1, poleVariant);
+  drawDropPole(x2 + offset,  1, poleVariant);
 
   // ----- wire (shadow + glow + core) -----
   ctx.save();
