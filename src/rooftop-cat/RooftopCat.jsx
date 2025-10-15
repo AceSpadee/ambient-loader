@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import { PALETTE } from "./palette.js";
 import { clamp, lerpColor, hsl, centerText, overlap, roundRect } from "./utils.js";
-import { makeScenery, drawCloud, drawBuilding, drawSilhouette } from "./scenery.js";
+import { makeScenery, drawCloud, drawBuilding } from "./scenery.js";
 import { initWeather, advanceLightning, renderLightning } from "./weather.js";
 import { emitSteam, updateSteam, spawnPuffs, updatePuffs } from "./effects.js";
 import { spawnObstacle, drawObstacles } from "./obstacles.js";
 import { drawCat } from "./player.js";
+
+// Modular deck + under-deck wall
+import { drawDeck, initUnderDeck } from "./drawDeck.js";
 
 export default function RooftopCat() {
   const canvasRef = useRef(null);
@@ -16,7 +19,7 @@ export default function RooftopCat() {
   const [best, setBest] = useState(() => Number(localStorage.getItem("rc.best") || 0));
   const [gameState, setGameState] = useState("ready"); // ready | playing | paused | dead
   const [cycleMode, setCycleMode] = useState(() => localStorage.getItem("rc.cycle") || "auto"); // auto|night|dawn|day
-  const [weather, setWeather] = useState(() => localStorage.getItem("rc.weather") || "none"); // none|rain|snow|fog
+  const [weather, setWeather] = useState(() => localStorage.getItem("rc.weather") || "none"); // none|rain|snow|fog|storm
 
   const reduceMotionRef = useRef(reduceMotion);
   const gameStateRef = useRef(gameState);
@@ -31,6 +34,12 @@ export default function RooftopCat() {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
+    // Prevent mobile browser gestures from hijacking input
+    canvas.style.touchAction = "none";
+    canvas.style.userSelect = "none";
+    canvas.style.webkitUserSelect = "none";
+    canvas.style.webkitTouchCallout = "none";
+
     // ---------- sizing & DPR ----------
     function resize() {
       const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
@@ -41,6 +50,7 @@ export default function RooftopCat() {
       canvas.style.width = w + "px";
       canvas.style.height = h + "px";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // We re-init under-deck on resetRun; no state mutation here.
     }
     resize();
     window.addEventListener("resize", resize);
@@ -62,8 +72,8 @@ export default function RooftopCat() {
       skyline: [],
       backTall: [],
       frontTall: [],
-      backSmallBottom: [],
-      frontSmallBottom: [],
+      backSmallBottom: [],   // generated but not drawn
+      frontSmallBottom: [],  // generated but not drawn
       groundY: 0,
 
       // entities
@@ -94,6 +104,11 @@ export default function RooftopCat() {
 
       // fair-spawn context (filled every frame)
       playerCtx: null,
+
+      // under-deck data (columns, gaps, scroll)
+      underDeck: null,
+      deckGaps: [],
+      deckScrollX: 0,
     };
 
     // ---- Variable jump params ----
@@ -102,10 +117,9 @@ export default function RooftopCat() {
     const HOLD_GRAVITY_FACTOR = 0.55;
     const CUT_GRAVITY_FACTOR  = 1.9;
 
-    const input = { 
-      duck: false, 
-      tapDownAt: 0, 
-      jumpBufferT: 0, 
+    const input = {
+      duck: false,
+      jumpBufferT: 0,
       coyoteT: 0,
       jumpHeld: false,
       jumpHoldT: 0
@@ -125,6 +139,8 @@ export default function RooftopCat() {
       state.shakeAmp = 0; state.shakeT = 0; state.shakeDur = 0;
       state.spawnTimer = 0.2; state.hitFxT = 0;
       state.groundY = calcGroundY();
+      state.deckGaps = [];
+      state.deckScrollX = 0;
 
       player.x = 120; player.y = state.groundY - player.h; player.vy = 0; player.onGround = true; player.anim = 0;
 
@@ -132,8 +148,11 @@ export default function RooftopCat() {
       const s = makeScenery(canvas, state.groundY, reduceMotionRef.current);
       state.stars = s.stars; state.clouds = s.clouds; state.skyline = s.skyline;
       state.backTall = s.backTall; state.frontTall = s.frontTall;
-      state.backSmallBottom = s.backSmallBottom; state.frontSmallBottom = s.frontSmallBottom;
+      state.backSmallBottom = s.backSmallBottom; state.frontSmallBottom = s.frontSmallBottom; // not drawn
       initWeather(weatherRef.current, state, canvas, reduceMotionRef.current);
+
+      // initialize under-deck columns & gap spans
+      initUnderDeck(state, canvas);
     }
 
     // first scene
@@ -151,11 +170,11 @@ export default function RooftopCat() {
       if(e.repeat) return;
       const k=e.key.toLowerCase();
 
-      // NEW: resume from pause on ANY key press
+      // resume from pause on ANY key press
       if (gameStateRef.current === "paused") {
         e.preventDefault();
         setGameState("playing");
-        return; // don't also treat this press as jump/duck/etc.
+        return;
       }
 
       if(k===" "||k==="arrowup"||k==="w"){ e.preventDefault(); handleStartOrJump(); input.jumpHeld = true; }
@@ -181,33 +200,66 @@ export default function RooftopCat() {
       if(k==="arrowdown"||k==="s") input.duck=false;
     }
 
-    // Resume on click/tap while paused (pointerdown on the canvas)
+    // --- Mobile-friendly pointer controls (zones + multi-touch) ---
+    const pointers = new Map(); // pointerId -> "jump" | "duck"
+
+    function roleFromEvent(e){
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const w = rect.width;
+      return x < w * 0.42 ? "duck" : "jump"; // left 42% duck, right 58% jump
+    }
+
     function onPointerDown(e){
       e.preventDefault();
+      canvas.setPointerCapture?.(e.pointerId);
+
+      // Resume if paused
       if (gameStateRef.current === "paused") {
         setGameState("playing");
-        input.tapDownAt = 0;
-        input.duck = false;
+        pointers.clear();
         return;
       }
-      input.tapDownAt = performance.now();
+
+      const role = roleFromEvent(e);
+      pointers.set(e.pointerId, role);
+
+      if (role === "duck") {
+        input.duck = true; // hold to duck
+      } else {
+        handleStartOrJump();
+        input.jumpHeld = true; // hold for variable jump height
+        input.jumpBufferT = JUMP_BUFFER; // queue if needed
+      }
     }
-    function onPointerUp(e){
+
+    function onPointerUpLike(e){
       e.preventDefault();
-      const held = performance.now() - input.tapDownAt;
-      if(held < 160) handleStartOrJump(); else input.duck=false;
-      input.tapDownAt=0;
+      const role = pointers.get(e.pointerId) || roleFromEvent(e);
+      pointers.delete(e.pointerId);
+
+      if (role === "duck") {
+        const stillDuck = Array.from(pointers.values()).some(r => r === "duck");
+        if (!stillDuck) input.duck = false;
+      } else {
+        const stillJump = Array.from(pointers.values()).some(r => r === "jump");
+        if (!stillJump) input.jumpHeld = false;
+      }
     }
-    function onPointerCancel(){ input.duck=false; input.tapDownAt=0; }
+
+    function onPointerUp(e){ onPointerUpLike(e); }
+    function onPointerCancel(e){ onPointerUpLike(e); }
+    function onContextMenu(e){ e.preventDefault(); } // iOS long-press menu
+
     function onBlur(){ if(gameStateRef.current==="playing"){ setGameState("paused"); } }
 
-    const pressPoll=setInterval(()=>{ if(!input.tapDownAt) return; if(performance.now()-input.tapDownAt>160) input.duck=true; },50);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
-    canvas.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", onPointerCancel);
+    canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+    window.addEventListener("pointerup", onPointerUp, { passive: false });
+    window.addEventListener("pointercancel", onPointerCancel, { passive: false });
+    window.addEventListener("contextmenu", onContextMenu);
 
     // ---------- loop ----------
     let raf=0; raf=requestAnimationFrame(step);
@@ -218,56 +270,65 @@ export default function RooftopCat() {
       raf=requestAnimationFrame(step);
     }
 
+    function centerOverGap(x, w, gaps, pad = 6){
+      if (!gaps || !gaps.length) return false;
+      const cx = x + w * 0.5;
+      for (const g of gaps){
+        const gl = g.x + pad;           // small inward pad for forgiveness
+        const gr = g.x + g.w - pad;
+        if (cx > gl && cx < gr) return true;
+      }
+      return false;
+    }
+
     function update(dt){
-      // Elapsed world time (seconds since run start)
+      // time
       state.t += dt;
 
-      // --- SPEED / DIFFICULTY RAMP ------------------------------------------------
-      // Current horizontal “world” speed increases toward speedMax by speedRamp/sec.
-      // 🔧 To change the *acceleration*, edit `state.speedRamp` (defined in state init).
-      // 🔧 To change the *top speed*, edit `state.speedMax` (state init).
-      // 🔧 To change the *starting speed*, set `state.baseSpeed` and initial `state.speed` in resetRun().
-      const rm = reduceMotionRef.current ? 0.5 : 1; // halve ramp in reduce-motion
-      state.speed = Math.min(state.speedMax,
-        state.speed + state.speedRamp * rm * dt
-      );
+      // canvas dims (needed early)
+      const dpr = (window.devicePixelRatio || 1);
+      const w   = canvas.width  / dpr;
+      const h   = canvas.height / dpr;
 
-      // --- VARIABLE JUMP ----------------------------------------------------------
-      // We keep a small “buffer” so pressing jump just before landing still works,
-      // and a small “coyote” time to allow jumping shortly after leaving a ledge.
+      // --- speed ramp
+      const rm = reduceMotionRef.current ? 0.5 : 1;
+      state.speed = Math.min(state.speedMax, state.speed + state.speedRamp * rm * dt);
+
+      // --- variable jump
       input.jumpBufferT = Math.max(0, input.jumpBufferT - dt);
       input.coyoteT     = Math.max(0, input.coyoteT - dt);
 
-      // Start a jump if you buffered and are grounded (or in coyote)
       if (input.jumpBufferT > 0 && (player.onGround || input.coyoteT > 0)) {
-        player.vy = state.jumpVel;     // initial upward velocity
+        player.vy = state.jumpVel;
         player.onGround = false;
-        input.jumpBufferT = 0;         // consume the buffer
-        input.jumpHoldT = 0;           // reset “held jump” timer
+        input.jumpBufferT = 0;
+        input.jumpHoldT = 0;
       }
 
-      // Gravity shaping: holding jump reduces gravity up to MAX_HOLD → higher jump.
-      // Releasing jump early increases gravity → short hop.
       let g = state.gravity;
-      if (player.vy < 0) { // only while moving upward
+      if (player.vy < 0) {
         if (input.jumpHeld && input.jumpHoldT < MAX_HOLD) {
-          g *= HOLD_GRAVITY_FACTOR;    // 🔧 change “floatiness” while holding jump
+          g *= HOLD_GRAVITY_FACTOR;
           input.jumpHoldT += dt;
         } else if (!input.jumpHeld) {
-          g *= CUT_GRAVITY_FACTOR;     // 🔧 change how “snappy” short hops feel
+          g *= CUT_GRAVITY_FACTOR;
         }
       }
-      player.vy += g * dt;             // integrate gravity
+      player.vy += g * dt;
 
       // --- GROUND / DUCK COLLISION -----------------------------------------------
-      // Ducking lowers the player’s collision box.
       const targetH = input.duck ? player.duckH : player.h;
       player.y += player.vy * dt;
 
-      if (player.y + targetH >= state.groundY) {
-        // Landed: snap to the ground and trigger a little impact puff
+      const feetY   = player.y + targetH;
+      const overGap = centerOverGap(player.x, player.w, state.deckGaps || [], 4);
+
+      if (!overGap && feetY >= state.groundY) {
+        // On solid deck → snap to ground
         player.y = state.groundY - targetH;
+
         if (!player.onGround) {
+          // landing puff just once when transitioning to ground
           spawnPuffs(
             state,
             player.x + player.w * 0.6,
@@ -275,35 +336,44 @@ export default function RooftopCat() {
             Math.min(10 + Math.abs(player.vy) * 0.01, 18),
             reduceMotionRef.current
           );
-          input.coyoteT = COYOTE;      // refresh coyote after landing
         }
-        player.onGround = true;
-        player.vy = 0;
-        input.jumpHoldT = 0;
+
+        player.onGround   = true;
+        input.coyoteT     = COYOTE;   // <- refresh every grounded frame
+        player.vy         = 0;
+        input.jumpHoldT   = 0;
       } else {
+        // In air or over a gap → let gravity continue
         player.onGround = false;
       }
 
-      // Tiny animation flavor for the cat
+      // fall off-screen → game over
+      if (player.y > h + 20) {
+        setGameState("dead");
+        const final = Math.floor(state.score);
+        setBest(prev => {
+          if (final > prev) {
+            localStorage.setItem("rc.best", String(final));
+            return final;
+          }
+          return prev;
+        });
+        return;
+      }
+
+      // flavor
       player.earFlickT -= dt;
       if (player.earFlickT <= 0) player.earFlickT = 3 + Math.random() * 6;
 
-      // Canvas-space helpers (logical pixels)
-      const dpr = (window.devicePixelRatio || 1);
-      const w = canvas.width / dpr, h = canvas.height / dpr;
-
-      // --- PARALLAX / AMBIENCE ----------------------------------------------------
-      // Parallax speeds are % of world speed. Changing these alters the sense of depth.
-      moveBuildings(state.backTall,         state.speed * 0.24, dt, w);
-      moveBuildings(state.frontTall,        state.speed * 0.90, dt, w);
-      moveBuildings(state.backSmallBottom,  state.speed * 0.18, dt, w);
-      moveBuildings(state.frontSmallBottom, state.speed * 0.60, dt, w);
+      // --- ambience / parallax
+      moveBuildings(state.backTall,  state.speed * 0.24, dt, w);
+      moveBuildings(state.frontTall, state.speed * 0.90, dt, w);
 
       emitSteam(state, dt);
       twinkleWindows(state.backTall);
       twinkleWindows(state.frontTall);
 
-      // Clouds drift left and recycle offscreen
+      // clouds
       state.clouds.forEach(cl => {
         cl.x -= cl.v * dt;
         if (cl.x < -220) {
@@ -314,12 +384,11 @@ export default function RooftopCat() {
         }
       });
 
-      // --- WEATHER PARTICLES ------------------------------------------------------
-      // 🔧 Rain/snow speeds live in weather init; tweak there for “heavier” storms.
+      // weather
       if (state.rain.length){
         for (const r of state.rain) {
           r.x += r.vx * dt; r.y += r.vy * dt;
-          if (r.y > h + 20) { r.y = -10; r.x = (Math.random() * w); }
+          if (r.y > h + 20) { r.y = -10; r.x = Math.random() * w; }
           if (r.x < -20)    { r.x = w + 10; }
         }
       }
@@ -343,67 +412,53 @@ export default function RooftopCat() {
         }
       }
 
-      // Lightning timers/flash (no-ops unless weather === "storm")
-      // 🔧 To make strikes rarer/stronger/brighter: edit initStorm/advanceLightning/renderLightning in weather.js
       advanceLightning(state, dt, canvas);
 
-      // --- FAIR-SPAWN CONTEXT -----------------------------------------------------
-      // Helpful info for the spawner to make decisions.
+      // --- fair-spawn context
       state.playerCtx = {
-        x: player.x,
-        y: player.y,
-        w: player.w,
-        h: player.h,
-        duckH: player.duckH,
+        x: player.x, y: player.y, w: player.w,
+        h: player.h, duckH: player.duckH,
         isDucking: !!input.duck,
         groundY: state.groundY,
         speed: state.speed,
         laneTop: state.groundY - 110,
         laneBottom: state.groundY + state.deckH,
-        canvasW: w,
-        canvasH: h,
+        canvasW: w, canvasH: h,
       };
 
-      // --- OBSTACLES: WHEN TO SPAWN ----------------------------------------------
+      // --- spawns
       state.spawnTimer -= dt;
       if (state.spawnTimer <= 0) {
-        // The spawner may return an explicit delay (e.g., to avoid overlapping wires).
         const nextDelay = spawnObstacle(state, canvas);
         if (typeof nextDelay === "number" && Number.isFinite(nextDelay)) {
-          state.spawnTimer = nextDelay;  // use the spawner’s custom timing
+          state.spawnTimer = nextDelay;
         } else {
-          // Fallback cadence ties spacing to speed:
-          // - speedFactor ~ 1 at base speed → larger gaps, easier
-          // - speedFactor ~ 0 near max speed → smaller gaps, harder
-          const base = 1.08; // 🔧 overall spawn cadence multiplier (higher = fewer spawns)
+          const base = 1.08;
           const speedFactor = 1 - (state.speed - state.baseSpeed) /
                                 (state.speedMax - state.baseSpeed + 1e-6);
-
-          // Delay = base * (early/late scaling) * (random jitter)
-          // (0.55 + 0.8*speedFactor):
-          //   at base speed (speedFactor≈1):   ≈ 1.35  → long gaps
-          //   at max speed  (speedFactor≈0):   ≈ 0.55  → short gaps
-          // (0.8 + rand*0.6) ~ [0.8..1.4] jitter avoids a metronome feel
-          // 🔧 Make early game easier: increase 0.8 → e.g. 1.0..1.6, or raise the 0.55 baseline.
-          // 🔧 Make late game harder: lower 0.55 a bit, e.g. 0.45.
           state.spawnTimer = base
             * (0.55 + speedFactor * 0.8)
             * (0.8 + Math.random() * 0.6);
         }
       }
 
-      // --- OBSTACLES: MOVE & CULL -------------------------------------------------
+      // --- move & cull obstacles
       for (const o of state.obstacles) o.x -= state.speed * dt;
       while (state.obstacles.length && state.obstacles[0].x + state.obstacles[0].w < -80)
         state.obstacles.shift();
 
-      // --- COLLISIONS (supports multi-rect colliders) -----------------------------
-      // Slightly inset player rect for fairness.
+      // --- under-deck world scroll & gap bookkeeping
+      state.deckScrollX += state.speed * dt; // pattern scroll in world space
+      if (!state.deckGaps) state.deckGaps = [];
+      for (const gSpan of state.deckGaps) gSpan.x -= state.speed * dt;
+      while (state.deckGaps.length && state.deckGaps[0].x + state.deckGaps[0].w < -80)
+        state.deckGaps.shift();
+
+      // --- collisions with regular obstacles
       const px = player.x, py = player.y;
       const pw = player.w, ph = input.duck ? player.duckH : player.h;
       const prx = px + 2, pry = py + 2, prw = pw - 4, prh = ph - 4;
 
-      // Fallback for water_tower_gate if it forgets to attach colliders()
       const buildWTGColliders = (o) => {
         const inset = Math.max(10, o.w * 0.18);
         const legW  = Math.max(4, Math.min(7, o.w * 0.08));
@@ -437,11 +492,9 @@ export default function RooftopCat() {
         }
 
         if (hit){
-          // Camera shake + brief flash
           state.shakeAmp = reduceMotionRef.current ? 3 : 6;
           state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
 
-          // End the run, record best score
           setGameState("dead");
           const final = Math.floor(state.score);
           setBest(prev => {
@@ -451,36 +504,56 @@ export default function RooftopCat() {
             }
             return prev;
           });
-          break;
+          return;
         }
       }
 
-      // Particle systems after collision logic so hit flash appears this frame
+      // --- under-deck rail (gap-wall) hitboxes — lose if you hit the wall
+      {
+        const udTop = state.groundY + state.deckH + state.deckLip; // top of under-deck wall
+        const udH   = Math.max(0, h - udTop);
+        const EDGE_W = 6;
+
+        for (const gSpan of state.deckGaps){
+          const leftRect  = { x: gSpan.x - EDGE_W, y: udTop, w: EDGE_W, h: udH };
+          const rightRect = { x: gSpan.x + gSpan.w, y: udTop, w: EDGE_W, h: udH };
+
+          if (overlap(prx, pry, prw, prh, leftRect.x, leftRect.y, leftRect.w, leftRect.h) ||
+              overlap(prx, pry, prw, prh, rightRect.x, rightRect.y, rightRect.w, rightRect.h)) {
+            state.shakeAmp = reduceMotionRef.current ? 3 : 6;
+            state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
+
+            setGameState("dead");
+            const final = Math.floor(state.score);
+            setBest(prev => {
+              if (final > prev) {
+                localStorage.setItem("rc.best", String(final));
+                return final;
+              }
+              return prev;
+            });
+            return;
+          }
+        }
+      }
+
+      // --- particles & scoring
       updatePuffs(state, dt);
       updateSteam(state, dt);
 
-      // --- SCORING (SCALES WITH SPEED) -------------------------------------------
-      // Score grows with speed; a gentle superlinear bump at high speeds feels rewarding.
-      // Base term: (dt * speed * 0.02)
-      // 🔧 To make *all* scoring faster/slower, change 0.02 globally.
       const srScore = clamp(
         (state.speed - state.baseSpeed) / (state.speedMax - state.baseSpeed),
         0, 1
       );
-      // 🔧 To make high-speed score accelerate more/less, tweak 0.85 (floor), 1.3 (gain), and exponent 1.15:
-      //    higher gain/exponent → bigger bonus near max speed.
       const scoreMult = 0.85 + 1.3 * Math.pow(srScore, 1.15);
       state.score += dt * state.speed * 0.02 * scoreMult;
 
-      // Push integer score to UI only when it changes
       const s = Math.floor(state.score);
       if (s !== score) setScore(s);
 
-      // Fade the hint once you’ve jumped
       if (state.firstJumpDone && state.hintAlpha > 0)
         state.hintAlpha = Math.max(0, state.hintAlpha - dt * 0.8);
 
-      // Decay the post-hit white flash
       state.hitFxT = Math.max(0, state.hitFxT - dt);
     }
 
@@ -512,36 +585,46 @@ export default function RooftopCat() {
 
     function render(dt){
       const dpr = (window.devicePixelRatio || 1);
-      const w=canvas.width/dpr, h=canvas.height/dpr;
+      const w = canvas.width / dpr, h = canvas.height / dpr;
 
       // hit flash filter
       ctx.filter = (state.hitFxT>0) ? "grayscale(60%) contrast(110%)" : "none";
 
-      // time-of-day
+      // time of day
       let phase;
       if (cycleModeRef.current === "auto") phase = (Math.sin(performance.now()*0.00005)+1)/2;
       else if (cycleModeRef.current === "night") phase = 0.05;
-      else if (cycleModeRef.current === "dawn") phase = 0.35;
-      else phase = 0.8;
+      else if (cycleModeRef.current === "dawn")  phase = 0.35;
+      else                                       phase = 0.8;
 
       // sky
-      const skyA=hsl(lerpColor(PALETTE.skyA1, PALETTE.skyA2, phase));
-      const skyB=hsl(lerpColor(PALETTE.skyB1, PALETTE.skyB2, phase));
-      const grad=ctx.createLinearGradient(0,0,0,h); grad.addColorStop(0,skyA); grad.addColorStop(1,skyB); ctx.fillStyle=grad; ctx.fillRect(0,0,w,h);
+      const skyA = hsl(lerpColor(PALETTE.skyA1, PALETTE.skyA2, phase));
+      const skyB = hsl(lerpColor(PALETTE.skyB1, PALETTE.skyB2, phase));
+      const grad = ctx.createLinearGradient(0,0,0,h);
+      grad.addColorStop(0, skyA); grad.addColorStop(1, skyB);
+      ctx.fillStyle = grad; ctx.fillRect(0,0,w,h);
 
       // stars + clouds
-      const night=1-phase; if(night>0.15&&!reduceMotionRef.current){ ctx.globalAlpha=0.5*(night-0.15); ctx.fillStyle="#cfd8ff"; for(const s of state.stars){ const tw=0.5+0.5*Math.sin(state.t*2+s.p); ctx.globalAlpha=0.2+s.a*tw*(night-0.1); ctx.fillRect(s.x,s.y,1.2,1.2);} ctx.globalAlpha=1; }
-      if(!reduceMotionRef.current){ for(const cl of state.clouds) drawCloud(ctx, cl.x, cl.y, cl.s, cl.a); }
+      const night = 1 - phase;
+      if (night > 0.15 && !reduceMotionRef.current){
+        ctx.globalAlpha = 0.5*(night - 0.15);
+        ctx.fillStyle = "#cfd8ff";
+        for (const s of state.stars){
+          const tw = 0.5 + 0.5 * Math.sin(state.t*2 + s.p);
+          ctx.globalAlpha = 0.2 + s.a * tw * (night - 0.1);
+          ctx.fillRect(s.x, s.y, 1.2, 1.2);
+        }
+        ctx.globalAlpha = 1;
+      }
+      if (!reduceMotionRef.current){
+        for (const cl of state.clouds) drawCloud(ctx, cl.x, cl.y, cl.s, cl.a);
+      }
 
       renderLightning(ctx, state, canvas);
 
-      // skyline silhouette
-      ctx.fillStyle="#091120"; ctx.globalAlpha=0.6; for(const b of state.skyline){ ctx.beginPath(); ctx.moveTo(b.x+ (b.roof==="spike"?6:2), b.y); /* tip */ ; ctx.closePath(); }
-      ctx.globalAlpha=0.6; for(const b of state.skyline){ roundRect(ctx,b.x,b.y,b.w,b.h,b.roof==="spike"?6:2,true);} ctx.globalAlpha=1;
+      const gy = state.groundY;
 
-      const gy=state.groundY;
-
-      // depth fog
+      // subtle depth fog above the deck
       const df = ctx.createLinearGradient(0, 0, 0, gy);
       df.addColorStop(0.00, "rgba(12,18,30,0.38)");
       df.addColorStop(0.55, "rgba(12,18,30,0.18)");
@@ -555,17 +638,41 @@ export default function RooftopCat() {
         const ease = (1 - k) * (1 - k);
         sx = Math.sin(state.shakeT * 40) * state.shakeAmp * ease;
         sy = Math.cos(state.shakeT * 32) * state.shakeAmp * 0.6 * ease;
-        state.shakeT += dt;
       }
 
       ctx.save();
       ctx.translate(sx, sy);
 
-      // back strip
-      ctx.globalAlpha=0.85; ctx.fillStyle=PALETTE.backSmall; for(const b of state.backSmallBottom) drawSilhouette(ctx,b); ctx.globalAlpha=1;
+      /* ---------------- Buildings (single pass, bottom-anchored, behind deck) ---------------- */
+      // We extend each building by the distance from deck top to screen bottom.
+      const extendBy = (h - gy);
 
-      // back tall
-      ctx.globalAlpha=0.46; for(const b of state.backTall) drawBuilding(ctx,b); ctx.globalAlpha=1;
+      // Skyline silhouettes (extended)
+      ctx.fillStyle = "#091120"; ctx.globalAlpha = 0.6;
+      for (const b of state.skyline){
+        const extH = b.h + extendBy;
+        const yExt = h - extH;       // equals gy - b.h → same top as before
+        roundRect(ctx, b.x, yExt, b.w, extH, b.roof === "spike" ? 6 : 2, true);
+      }
+      ctx.globalAlpha = 1;
+
+      // Back layer (extended)
+      ctx.globalAlpha = 0.46;
+      for (const b of state.backTall){
+        const extH = b.h + extendBy;
+        const yExt = h - extH;
+        drawBuilding(ctx, { ...b, y: yExt, h: extH });
+      }
+      ctx.globalAlpha = 1;
+
+      // Front layer (extended)
+      ctx.globalAlpha = 0.95;
+      for (const b of state.frontTall){
+        const extH = b.h + extendBy;
+        const yExt = h - extH;
+        drawBuilding(ctx, { ...b, y: yExt, h: extH });
+      }
+      ctx.globalAlpha = 1;
 
       // mid fog blobs
       if (state.fog.length && state.fogTex){
@@ -579,22 +686,10 @@ export default function RooftopCat() {
         }
         ctx.globalAlpha = 1;
       }
+      /* -------------------------------------------------------------------------------------- */
 
-      // lane band
-      const laneTop = gy - 110; const laneBot = gy + state.deckH;
-      const fogBand = ctx.createLinearGradient(0, laneTop, 0, laneBot);
-      fogBand.addColorStop(0, "rgba(5,8,16,0)");
-      fogBand.addColorStop(1, "rgba(5,8,16,0.35)");
-      ctx.fillStyle = fogBand; ctx.fillRect(0, laneTop, w, laneBot - laneTop + state.deckLip);
-
-      // deck
-      ctx.fillStyle=PALETTE.lineTop; ctx.fillRect(0,gy,w,state.deckH);
-      ctx.fillStyle=PALETTE.lineHighlight; ctx.fillRect(0,gy, w, 2);
-      ctx.fillStyle=PALETTE.lineLip; ctx.fillRect(0,gy+state.deckH,w,state.deckLip);
-
-      // front strip + front tall
-      ctx.globalAlpha=0.95; ctx.fillStyle=PALETTE.frontSmall; for(const b of state.frontSmallBottom) drawSilhouette(ctx,b); ctx.globalAlpha=1;
-      ctx.globalAlpha=0.95; for(const b of state.frontTall) drawBuilding(ctx,b); ctx.globalAlpha=1;
+      // deck + under-deck (on top; already punched at gaps)
+      drawDeck(ctx, state, canvas);
 
       // steam
       for (const s of state.steam){
@@ -612,13 +707,14 @@ export default function RooftopCat() {
       }
 
       // player
-      const ph= input.duck ? player.duckH : player.h;
+      const ph = input.duck ? player.duckH : player.h;
       const angle = clamp(player.vy * 0.0006, -0.25, 0.25);
-      drawCat(ctx,player.x,player.y,player.w,ph,state.t, angle, player.earFlickT < 0.2 ? 1 : 0);
+      drawCat(ctx, player.x, player.y, player.w, ph, state.t, angle, player.earFlickT < 0.2 ? 1 : 0);
 
       // rain/snow
       if (state.rain.length){
-        ctx.save(); ctx.globalAlpha = 0.65; ctx.strokeStyle = "rgba(200,220,255,0.5)"; ctx.lineWidth = 1; ctx.beginPath();
+        ctx.save(); ctx.globalAlpha = 0.65; ctx.strokeStyle = "rgba(200,220,255,0.5)";
+        ctx.lineWidth = 1; ctx.beginPath();
         for (const r of state.rain){ ctx.moveTo(r.x, r.y); ctx.lineTo(r.x + r.vx*0.02, r.y + r.vy*0.02); }
         ctx.stroke(); ctx.restore();
       }
@@ -630,9 +726,10 @@ export default function RooftopCat() {
 
       ctx.restore(); // end shake
 
-      // UI text + overlay
-      ctx.fillStyle="#c7d2ff"; ctx.font="600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif"; 
-      ctx.fillText(`score ${Math.floor(state.score)}`,16,28); ctx.fillText(`best ${best}`,16,48);
+      // UI & overlays
+      ctx.fillStyle="#c7d2ff"; ctx.font="600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+      ctx.fillText(`score ${Math.floor(state.score)}`,16,28);
+      ctx.fillText(`best ${best}`,16,48);
 
       if (state.hintAlpha>0 && gameStateRef.current==="playing"){
         ctx.save(); ctx.globalAlpha = state.hintAlpha;
@@ -644,7 +741,8 @@ export default function RooftopCat() {
 
       if (gameStateRef.current === "paused"){
         state.pausedOverlayAlpha = Math.min(0.75, state.pausedOverlayAlpha + 0.08);
-        ctx.save(); ctx.globalAlpha = state.pausedOverlayAlpha; ctx.fillStyle = "#060913cc"; ctx.fillRect(0,0,w,h); ctx.globalAlpha = 1;
+        ctx.save(); ctx.globalAlpha = state.pausedOverlayAlpha; ctx.fillStyle = "#060913cc";
+        ctx.fillRect(0,0,w,h); ctx.globalAlpha = 1;
         centerText(ctx, w, h, "Paused\nPress any key or Click to resume", 20);
         ctx.restore();
       } else {
@@ -652,20 +750,21 @@ export default function RooftopCat() {
       }
 
       if (state.hitFxT>0){
-        ctx.save(); ctx.globalAlpha = Math.min(0.25, state.hitFxT*0.6); ctx.fillStyle = "#ffffff"; ctx.fillRect(0,0,w,h); ctx.restore();
+        ctx.save(); ctx.globalAlpha = Math.min(0.25, state.hitFxT*0.6);
+        ctx.fillStyle = "#ffffff"; ctx.fillRect(0,0,w,h); ctx.restore();
       }
     }
 
     // cleanup
     return () => {
       cancelAnimationFrame(raf);
-      clearInterval(pressPoll);
       window.removeEventListener("resize", resize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
+      window.removeEventListener("contextmenu", onContextMenu);
       canvas.removeEventListener("pointerdown", onPointerDown);
     };
   }, []);
@@ -687,7 +786,6 @@ export default function RooftopCat() {
           Weather: {prettyWeather(typeof window !== "undefined" ? (localStorage.getItem("rc.weather")||"none") : "none")} (R)
         </button>
 
-        {/* Pause/Resume button (doesn't synthesize keypress; toggles directly) */}
         <button title="Pause/Resume (P)" style={chip} onClick={handlePauseToggle}>
           {gameState === "paused" ? "Resume: Click/P" : "Pause: P"}
         </button>
@@ -701,7 +799,7 @@ export default function RooftopCat() {
   );
 }
 
-// ---- tiny styles (unchanged) ----
+// ---- tiny styles ----
 const wrap={ position:"relative", minHeight:"100dvh", background:"#070a14" };
 const hud={ position:"absolute", top:12, right:12, display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" };
 const toggleLabel={ fontSize:12, color:"#d6dcff", display:"flex", alignItems:"center", gap:6, background:"rgba(7,10,20,0.4)", padding:"6px 10px", borderRadius:10 };

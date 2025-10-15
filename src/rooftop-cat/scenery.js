@@ -1,3 +1,4 @@
+// scenery.js
 import { pick, shade } from "./utils.js";
 import { PALETTE } from "./palette.js";
 import { roundRect } from "./utils.js";
@@ -73,6 +74,8 @@ export function makeBuildingObj(x, y, w, h, scaleFlag, silhouette = false) {
     roof: [],
     layer: silhouette ? "bottom" : "tall",
     baseColor: null,
+    // stable per-building seed to avoid window flicker when extended below deck
+    seed: (Math.random() * 0x7fffffff) | 0,
   };
 }
 
@@ -170,6 +173,11 @@ export function drawCloud(ctx, x, y, s=1, a=0.3){
 }
 function cloudBlob(ctx,x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); }
 
+/* -------------------- deterministic noise helpers for stable extra rows ------------------- */
+function __hash32(n){ n|=0; n^=n<<13; n^=n>>>17; n^=n<<5; return (n>>>0); }
+function __rand01(seed){ return __hash32(seed) / 4294967295; } // 0..1
+/* ------------------------------------------------------------------------------------------ */
+
 export function drawBuilding(ctx, b){
   const baseColor = b.baseColor || (b.layer === "frontTall" ? PALETTE.frontTall : PALETTE.backTall);
   const g = ctx.createLinearGradient(0, b.y, 0, b.y + b.h);
@@ -177,6 +185,7 @@ export function drawBuilding(ctx, b){
   ctx.fillStyle = g;
   roundRect(ctx, b.x, b.y, b.w, b.h, 2, true);
 
+  // Panel lines (fill full current height)
   if (b.panelStep > 0) {
     ctx.save();
     for (let y = b.y + 6; y < b.y + b.h - 6; y += b.panelStep) {
@@ -188,24 +197,55 @@ export function drawBuilding(ctx, b){
     ctx.restore();
   }
 
+  // Roof props (stay at top)
   if (b.roof && b.roof.length) for (const rp of b.roof) drawRoofProp(ctx, b, rp);
 
-  if (b.hasBillboard && b.windows){ 
-    const bx=b.x+b.w*0.2, by=b.y-14, bw=b.w*0.6, bh=10; 
-    ctx.fillStyle="#1a2444"; roundRect(ctx,bx,by,bw,bh,3,true); 
-    const scan=((performance.now() * 0.1) % bw); 
-    ctx.fillStyle="#5ab0ff"; ctx.globalAlpha=0.25; ctx.fillRect(bx+scan,by+1,4,bh-2); ctx.globalAlpha=1; 
-  }
+  // Windows — extend pattern to the *current* height
+  const win = b.windows;
+  if (!win) return;
 
-  const win=b.windows; if(!win) return;
-  const padX=6, padY=8; const startX=b.x+padX, startY=b.y+padY; const wW=3, wH=5;
+  const padX = 6, padY = 8;
+  const startX = b.x + padX, startY = b.y + padY;
+  const wW = 3, wH = 5;
+
+  const cellX = win.cellX, cellY = win.cellY;
+  const cols  = win.cols;
+  const rowsFit = Math.max(4, Math.floor((b.h - padY * 2) / cellY)); // how many rows fit now
+
+  const origRows = win.rows;
+  const density  = (b.scaleFlag === 2 ? 0.24 : 0.18);
+  const warmProb = 0.80;
+
   const windowAlpha = (b.layer === "backTall" ? 0.55 : 0.9);
-  for(let r=1;r<win.rows-1;r++){
-    for(let c=1;c<win.cols-1;c++){
-      const id=r*1000+c; if(!win.lit.has(id)) continue; const wx=startX+c*win.cellX, wy=startY+r*win.cellY;
-      ctx.fillStyle=win.warm.has(id)?PALETTE.windowWarm:PALETTE.windowCool; ctx.globalAlpha=windowAlpha; ctx.fillRect(wx,wy,wW,wH);
+  const seedBase = (b.seed >>> 0); // stable per building
+
+  ctx.save();
+  for (let r = 1; r < rowsFit - 1; r++){
+    for (let c = 1; c < cols - 1; c++){
+      const id = r * 1000 + c;
+
+      let lit, warm;
+      if (r < origRows - 1) {
+        // within authored grid (above deckline): keep exactly as generated + twinkle
+        lit  = win.lit.has(id);
+        warm = win.warm.has(id);
+      } else {
+        // rows that didn't exist originally (below deck): deterministic extension
+        const h1 = __rand01(seedBase ^ (r * 374761393) ^ (c * 668265263));
+        lit = h1 < density;
+        const h2 = __rand01(seedBase ^ 0x9e3779b9 ^ (r * 1274126177) ^ (c * 2246822519));
+        warm = lit && (h2 < warmProb);
+      }
+
+      if (!lit) continue;
+      const wx = startX + c * cellX;
+      const wy = startY + r * cellY;
+      ctx.fillStyle   = warm ? PALETTE.windowWarm : PALETTE.windowCool;
+      ctx.globalAlpha = windowAlpha;
+      ctx.fillRect(wx, wy, wW, wH);
     }
   }
+  ctx.restore();
   ctx.globalAlpha = 1;
 }
 

@@ -1,6 +1,59 @@
+// obstacles.js (top section)
+
+// imports
 import { pickWeighted, shade, clamp } from "./utils.js";
-import { PALETTE } from "./palette.js";
 import { roundRect, roundRectPath, neonStrokePath } from "./utils.js";
+import { PALETTE } from "./palette.js";
+
+// ---------------------------------------------------------------------------
+// Skylight / gap helpers (kept in sync with drawDeck’s gap calculation)
+// drawDeck turns a skylight’s width into a gap by subtracting a fixed pad
+// on both sides. Keep this identical here so width ↔ gap mapping is exact.
+export const SKYLIGHT_GAP_PAD = 8;
+
+/**
+ * Estimate a fair jumpable gap range as speed increases.
+ * Tune these numbers to taste; they match current jump physics.
+ */
+export function jumpableGapRange(state){
+  const v = Math.max(280, Math.min(1200, state.speed)); // clamp for stability
+  // At baseSpeed≈340 → ~100..180px
+  // At maxSpeed≈1200 → ~150..280px
+  const min = 80 + 0.06 * v;
+  const max = 130 + 0.15 * v;
+  return { min, max };
+}
+
+/**
+ * Pick a target gap width within the allowed range with a slight
+ * “easier” bias (bias < 0.5). Increase bias for easier average gaps.
+ */
+export function pickGapWidth(state){
+  const { min, max } = jumpableGapRange(state);
+  const bias = 0.35;                 // 0.35 → skews mildly easier
+  const t = Math.pow(Math.random(), bias);
+  return min + t * (max - min);
+}
+
+// helper: where the last gap ended (so we keep enough runway between gaps)
+export function lastSkylightRight(state){
+  // Prefer the new gap list
+  if (state.deckGaps && state.deckGaps.length){
+    const last = state.deckGaps[state.deckGaps.length - 1];
+    // deckGaps store the *actual* gap width; add the pad on both sides to
+    // approximate the visual/deck footprint for spacing checks.
+    return last.x + last.w + SKYLIGHT_GAP_PAD * 2;
+  }
+  // Fallback if any legacy skylight obstacles still exist
+  let r = -Infinity;
+  for (let i = state.obstacles.length - 1; i >= 0; i--){
+    const o = state.obstacles[i];
+    if (o.type !== "skylight") continue;
+    r = o.x + o.w;
+    break;
+  }
+  return r;
+}
 
 // -------- spawner --------
 export function spawnObstacle(state, canvas){
@@ -39,7 +92,7 @@ export function spawnObstacle(state, canvas){
     ["chimney",      22],
     ["antenna",      16],
     ["hvac",         14],
-    ["skylight",     14],
+    ["skylight",     40],
     ["vent_pipe",    10],
     ["access_shed",  9],
     ["water_tank",    6],
@@ -120,8 +173,38 @@ export function spawnObstacle(state, canvas){
     const bw=44+Math.random()*36, bh=22+Math.random()*12;
     state.obstacles.push({type:"hvac",x:w+40,y:gy-bh,w:bw,h:bh});
   } else if (pick === "skylight") {
-    const bw=44+Math.random()*42, bh=16+Math.random()*10;
-    state.obstacles.push({type:"skylight",x:w+40,y:gy-bh,w:bw,h:bh,slope:Math.random()<0.5?1:-1});
+    // Treat skylight as a GAP ONLY (no obstacle pushed/drawn)
+
+    // Ensure enough runway from the previous gap.
+    const dpr = (window.devicePixelRatio || 1);
+    const w   = canvas.width / dpr;
+    const spawnX = w + 40;
+    const speed  = Math.max(120, state.speed);
+
+    const needRunway = 160 + (state.speed - state.baseSpeed) * 0.18; // tweakable
+    const lastR = lastSkylightRight(state);
+    if (lastR > -Infinity) {
+      const runway = spawnX - lastR;
+      if (runway < needRunway) {
+        const remain = needRunway - runway;
+        const delay  = Math.max(0.06, remain / speed);
+        return delay; // try again soon
+      }
+    }
+
+    // Pick a jumpable gap at current speed
+    const gapW = Math.round(pickGapWidth(state));
+
+    // Create the under-deck gap span (world-space).
+    // We offset by the pad so the under-deck dark opening aligns with the
+    // visual rails and the “former skylight footprint”.
+    const gapLeft = spawnX + SKYLIGHT_GAP_PAD;
+
+    if (!state.deckGaps) state.deckGaps = [];
+    state.deckGaps.push({ x: gapLeft, w: gapW });
+
+    // NOTE: We do NOT push an obstacle. drawObstacles() won’t render anything.
+    // The under-deck renderer will show the gap and rails; collisions handled in update().
   } else if (pick === "vent_pipe") {
     // Thicker diameter (old was bh = 32)
     const bh = 44;
