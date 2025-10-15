@@ -25,6 +25,11 @@ export default function RooftopCat() {
   const gameStateRef = useRef(gameState);
   const cycleModeRef = useRef(cycleMode);
   const weatherRef = useRef(weather);
+
+  // Live “best” mirror used by canvas HUD
+  const bestRef = useRef(best);
+  useEffect(() => { bestRef.current = best; }, [best]);
+
   useEffect(() => { reduceMotionRef.current = reduceMotion; localStorage.setItem("rc.rm", reduceMotion? "1":"0"); }, [reduceMotion]);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { cycleModeRef.current = cycleMode; localStorage.setItem("rc.cycle", cycleMode); }, [cycleMode]);
@@ -33,12 +38,6 @@ export default function RooftopCat() {
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-
-    // Prevent mobile browser gestures from hijacking input
-    canvas.style.touchAction = "none";
-    canvas.style.userSelect = "none";
-    canvas.style.webkitUserSelect = "none";
-    canvas.style.webkitTouchCallout = "none";
 
     // ---------- sizing & DPR ----------
     function resize() {
@@ -50,7 +49,6 @@ export default function RooftopCat() {
       canvas.style.width = w + "px";
       canvas.style.height = h + "px";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // We re-init under-deck on resetRun; no state mutation here.
     }
     resize();
     window.addEventListener("resize", resize);
@@ -72,8 +70,6 @@ export default function RooftopCat() {
       skyline: [],
       backTall: [],
       frontTall: [],
-      backSmallBottom: [],   // generated but not drawn
-      frontSmallBottom: [],  // generated but not drawn
       groundY: 0,
 
       // entities
@@ -91,7 +87,7 @@ export default function RooftopCat() {
 
       score: 0,
 
-      // calm shake
+      // camera shake
       shakeAmp: 0,
       shakeT: 0,
       shakeDur: 0,
@@ -105,8 +101,7 @@ export default function RooftopCat() {
       // fair-spawn context (filled every frame)
       playerCtx: null,
 
-      // under-deck data (columns, gaps, scroll)
-      underDeck: null,
+      // under-deck data (gaps, scroll)
       deckGaps: [],
       deckScrollX: 0,
     };
@@ -117,9 +112,10 @@ export default function RooftopCat() {
     const HOLD_GRAVITY_FACTOR = 0.55;
     const CUT_GRAVITY_FACTOR  = 1.9;
 
-    const input = {
-      duck: false,
-      jumpBufferT: 0,
+    const input = { 
+      duck: false, 
+      tapDownAt: 0, 
+      jumpBufferT: 0, 
       coyoteT: 0,
       jumpHeld: false,
       jumpHoldT: 0
@@ -146,9 +142,12 @@ export default function RooftopCat() {
 
       // scenery + weather
       const s = makeScenery(canvas, state.groundY, reduceMotionRef.current);
-      state.stars = s.stars; state.clouds = s.clouds; state.skyline = s.skyline;
-      state.backTall = s.backTall; state.frontTall = s.frontTall;
-      state.backSmallBottom = s.backSmallBottom; state.frontSmallBottom = s.frontSmallBottom; // not drawn
+      state.stars   = s.stars;
+      state.clouds  = s.clouds;
+      state.skyline = s.skyline;
+      state.backTall  = s.backTall;
+      state.frontTall = s.frontTall;
+
       initWeather(weatherRef.current, state, canvas, reduceMotionRef.current);
 
       // initialize under-deck columns & gap spans
@@ -200,66 +199,33 @@ export default function RooftopCat() {
       if(k==="arrowdown"||k==="s") input.duck=false;
     }
 
-    // --- Mobile-friendly pointer controls (zones + multi-touch) ---
-    const pointers = new Map(); // pointerId -> "jump" | "duck"
-
-    function roleFromEvent(e){
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const w = rect.width;
-      return x < w * 0.42 ? "duck" : "jump"; // left 42% duck, right 58% jump
-    }
-
+    // Resume on click/tap while paused (pointerdown on the canvas)
     function onPointerDown(e){
       e.preventDefault();
-      canvas.setPointerCapture?.(e.pointerId);
-
-      // Resume if paused
       if (gameStateRef.current === "paused") {
         setGameState("playing");
-        pointers.clear();
+        input.tapDownAt = 0;
+        input.duck = false;
         return;
       }
-
-      const role = roleFromEvent(e);
-      pointers.set(e.pointerId, role);
-
-      if (role === "duck") {
-        input.duck = true; // hold to duck
-      } else {
-        handleStartOrJump();
-        input.jumpHeld = true; // hold for variable jump height
-        input.jumpBufferT = JUMP_BUFFER; // queue if needed
-      }
+      input.tapDownAt = performance.now();
     }
-
-    function onPointerUpLike(e){
+    function onPointerUp(e){
       e.preventDefault();
-      const role = pointers.get(e.pointerId) || roleFromEvent(e);
-      pointers.delete(e.pointerId);
-
-      if (role === "duck") {
-        const stillDuck = Array.from(pointers.values()).some(r => r === "duck");
-        if (!stillDuck) input.duck = false;
-      } else {
-        const stillJump = Array.from(pointers.values()).some(r => r === "jump");
-        if (!stillJump) input.jumpHeld = false;
-      }
+      const held = performance.now() - input.tapDownAt;
+      if(held < 160) handleStartOrJump(); else input.duck=false;
+      input.tapDownAt=0;
     }
-
-    function onPointerUp(e){ onPointerUpLike(e); }
-    function onPointerCancel(e){ onPointerUpLike(e); }
-    function onContextMenu(e){ e.preventDefault(); } // iOS long-press menu
-
+    function onPointerCancel(){ input.duck=false; input.tapDownAt=0; }
     function onBlur(){ if(gameStateRef.current==="playing"){ setGameState("paused"); } }
 
+    const pressPoll=setInterval(()=>{ if(!input.tapDownAt) return; if(performance.now()-input.tapDownAt>160) input.duck=true; },50);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
-    canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
-    window.addEventListener("pointerup", onPointerUp, { passive: false });
-    window.addEventListener("pointercancel", onPointerCancel, { passive: false });
-    window.addEventListener("contextmenu", onContextMenu);
+    canvas.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
 
     // ---------- loop ----------
     let raf=0; raf=requestAnimationFrame(step);
@@ -350,14 +316,6 @@ export default function RooftopCat() {
       // fall off-screen → game over
       if (player.y > h + 20) {
         setGameState("dead");
-        const final = Math.floor(state.score);
-        setBest(prev => {
-          if (final > prev) {
-            localStorage.setItem("rc.best", String(final));
-            return final;
-          }
-          return prev;
-        });
         return;
       }
 
@@ -496,14 +454,6 @@ export default function RooftopCat() {
           state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
 
           setGameState("dead");
-          const final = Math.floor(state.score);
-          setBest(prev => {
-            if (final > prev) {
-              localStorage.setItem("rc.best", String(final));
-              return final;
-            }
-            return prev;
-          });
           return;
         }
       }
@@ -524,14 +474,6 @@ export default function RooftopCat() {
             state.shakeT = 0; state.shakeDur = 0.45; state.hitFxT = 0.28;
 
             setGameState("dead");
-            const final = Math.floor(state.score);
-            setBest(prev => {
-              if (final > prev) {
-                localStorage.setItem("rc.best", String(final));
-                return final;
-              }
-              return prev;
-            });
             return;
           }
         }
@@ -551,6 +493,17 @@ export default function RooftopCat() {
       const s = Math.floor(state.score);
       if (s !== score) setScore(s);
 
+      // Live best update
+      if (s > bestRef.current) {
+        bestRef.current = s;
+        localStorage.setItem("rc.best", String(s));
+        setBest(s);
+      }
+
+      // Progress (and decay) camera shake
+      if (state.shakeT <= state.shakeDur) state.shakeT += dt;
+      else state.shakeAmp = 0;
+
       if (state.firstJumpDone && state.hintAlpha > 0)
         state.hintAlpha = Math.max(0, state.hintAlpha - dt * 0.8);
 
@@ -559,25 +512,25 @@ export default function RooftopCat() {
 
     function moveBuildings(arr, vel, dt, w){
       for(const b of arr){
-        b.x-=vel*dt;
-        if(b.x+b.w<-80){
-          const nx = w + Math.random()*240;
-          const dx = nx - (b.x + b.w);
-          b.x += dx + b.w;
+        b.x -= vel * dt;
+        if (b.x + b.w < -80) {
+          // Re-spawn just beyond the right edge
+          b.x = w + Math.random() * 240;
         }
       }
     }
     function twinkleWindows(arr){
       for(const b of arr){
         if(!b.windows) continue;
-        b.twinkleT+=0.016;
-        if(b.twinkleT>b.twinkleRate){
-          b.twinkleT=0;
-          for(let k=0;k<3;k++){
-            const r=1+Math.floor(Math.random()*(b.windows.rows-2));
-            const c=1+Math.floor(Math.random()*(b.windows.cols-2));
-            const id=r*1000+c;
-            if(b.windows.lit.has(id)) b.windows.lit.delete(id); else b.windows.lit.add(id);
+        b.twinkleT += 0.016;
+        if (b.twinkleT > b.twinkleRate){
+          b.twinkleT = 0;
+          for (let k = 0; k < 3; k++){
+            const r = 1 + Math.floor(Math.random() * (b.windows.rows - 2));
+            const c = 1 + Math.floor(Math.random() * (b.windows.cols - 2));
+            const id = r * 1000 + c;
+            if (b.windows.lit.has(id)) b.windows.lit.delete(id);
+            else b.windows.lit.add(id);
           }
         }
       }
@@ -644,7 +597,6 @@ export default function RooftopCat() {
       ctx.translate(sx, sy);
 
       /* ---------------- Buildings (single pass, bottom-anchored, behind deck) ---------------- */
-      // We extend each building by the distance from deck top to screen bottom.
       const extendBy = (h - gy);
 
       // Skyline silhouettes (extended)
@@ -729,7 +681,7 @@ export default function RooftopCat() {
       // UI & overlays
       ctx.fillStyle="#c7d2ff"; ctx.font="600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
       ctx.fillText(`score ${Math.floor(state.score)}`,16,28);
-      ctx.fillText(`best ${best}`,16,48);
+      ctx.fillText(`best ${bestRef.current}`,16,48);
 
       if (state.hintAlpha>0 && gameStateRef.current==="playing"){
         ctx.save(); ctx.globalAlpha = state.hintAlpha;
@@ -758,13 +710,13 @@ export default function RooftopCat() {
     // cleanup
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(pressPoll);
       window.removeEventListener("resize", resize);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
-      window.removeEventListener("contextmenu", onContextMenu);
       canvas.removeEventListener("pointerdown", onPointerDown);
     };
   }, []);

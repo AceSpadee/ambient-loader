@@ -1,7 +1,7 @@
-// obstacles.js (top section)
+// obstacles.js (cleaned)
 
 // imports
-import { pickWeighted, shade, clamp } from "./utils.js";
+import { pickWeighted, shade } from "./utils.js";
 import { roundRect, roundRectPath, neonStrokePath } from "./utils.js";
 import { PALETTE } from "./palette.js";
 
@@ -37,22 +37,13 @@ export function pickGapWidth(state){
 
 // helper: where the last gap ended (so we keep enough runway between gaps)
 export function lastSkylightRight(state){
-  // Prefer the new gap list
   if (state.deckGaps && state.deckGaps.length){
     const last = state.deckGaps[state.deckGaps.length - 1];
     // deckGaps store the *actual* gap width; add the pad on both sides to
     // approximate the visual/deck footprint for spacing checks.
     return last.x + last.w + SKYLIGHT_GAP_PAD * 2;
   }
-  // Fallback if any legacy skylight obstacles still exist
-  let r = -Infinity;
-  for (let i = state.obstacles.length - 1; i >= 0; i--){
-    const o = state.obstacles[i];
-    if (o.type !== "skylight") continue;
-    r = o.x + o.w;
-    break;
-  }
-  return r;
+  return -Infinity;
 }
 
 // -------- spawner --------
@@ -128,7 +119,7 @@ export function spawnObstacle(state, canvas){
 
     state.obstacles.push({
       type: "chimney",
-      x: spawnX,          // use your computed spawnX (w + 40)
+      x: spawnX,
       y: gy - bh,
       w: bw,
       h: bh
@@ -176,11 +167,6 @@ export function spawnObstacle(state, canvas){
     // Treat skylight as a GAP ONLY (no obstacle pushed/drawn)
 
     // Ensure enough runway from the previous gap.
-    const dpr = (window.devicePixelRatio || 1);
-    const w   = canvas.width / dpr;
-    const spawnX = w + 40;
-    const speed  = Math.max(120, state.speed);
-
     const needRunway = 160 + (state.speed - state.baseSpeed) * 0.18; // tweakable
     const lastR = lastSkylightRight(state);
     if (lastR > -Infinity) {
@@ -398,7 +384,6 @@ export function drawObstacles(ctx, state, t){
     if(o.type==="chimney")      drawChimney(ctx, o);
     else if(o.type==="antenna") drawAntenna(ctx, o, t);
     else if(o.type==="hvac")    drawHVAC(ctx, o);
-    else if(o.type==="skylight")drawSkylight(ctx, o);
     else if(o.type==="vent_pipe")drawVentPipe(ctx, o);
     else if(o.type==="access_shed")drawAccessShed(ctx, o);
     else if(o.type==="water_tank") drawWaterTank(ctx, o);
@@ -891,128 +876,6 @@ function drawHVAC(ctx, o){
   );
 }
 
-function drawSkylight(ctx, o){
-  const slope = o.slope || 1;
-  const left  = o.x;
-  const right = o.x + o.w;
-  const yTop  = o.y;
-  const yBot  = o.y + o.h;
-
-  // where the “ridge” (high edge) lands inside the hitbox
-  const ridge = yTop + (slope > 0 ? 5 : o.h - 5);
-
-  // geometry knobs
-  const inset   = Math.max(7, Math.min(10, o.w * 0.18)); // glass inset from sides
-  const lipH    = 3;                                     // thin highlight strip near ridge
-  const boltPad = 3;                                     // how far in from corners to place bolts
-
-  // --- soft drop shadow on the deck (subtle)
-  ctx.save();
-  ctx.globalAlpha = 0.16;
-  ctx.fillStyle = "rgba(0,0,0,0.8)";
-  ctx.fillRect(left + 2, yBot, o.w - 4, 3);
-  ctx.restore();
-
-  // --- curb / outer frame (the trapezoid “box”)
-  ctx.fillStyle = shade(PALETTE.obstacleFill, -10);
-  _skylightPath(ctx, left, yBot, right, ridge);
-  ctx.fill();
-
-  // --- everything inside is clipped to the trapezoid
-  ctx.save();
-  _skylightPath(ctx, left, yBot, right, ridge);
-  ctx.clip();
-
-  // inner rim just under the ridge – little lip highlight
-  ctx.globalAlpha = 0.28;
-  ctx.fillStyle = "rgba(170,190,230,0.25)";
-  const lipY = ridge - (slope > 0 ? lipH : 0);
-  ctx.fillRect(left + inset - 1, lipY, Math.max(2, o.w - inset * 2 + 2), lipH);
-  ctx.globalAlpha = 1;
-
-  // --- glass panel
-  const gx1 = left + inset;
-  const gx2 = right - inset;
-  const gy1 = ridge;         // top of glass (near ridge)
-  const gy2 = yBot - 2;      // bottom, a hair above the curb bottom
-
-  const gGlass = ctx.createLinearGradient(gx1, Math.min(gy1, gy2), gx1, Math.max(gy1, gy2));
-  gGlass.addColorStop(0.00, "rgba(190,210,255,0.26)");
-  gGlass.addColorStop(0.60, "rgba(190,210,255,0.12)");
-  gGlass.addColorStop(1.00, "rgba(190,210,255,0.06)");
-  ctx.fillStyle = gGlass;
-  ctx.fillRect(gx1, Math.min(gy1, gy2), gx2 - gx1, Math.abs(gy2 - gy1));
-
-  // specular sweep (very faint diagonal shine)
-  ctx.save();
-  const gSpec = ctx.createLinearGradient(gx1, gy1, gx2, gy2);
-  gSpec.addColorStop(0.00, "rgba(255,255,255,0.00)");
-  gSpec.addColorStop(0.50, "rgba(255,255,255,0.08)");
-  gSpec.addColorStop(1.00, "rgba(255,255,255,0.00)");
-  ctx.globalCompositeOperation = "lighter";
-  ctx.fillStyle = gSpec;
-  ctx.fillRect(gx1, Math.min(gy1, gy2), gx2 - gx1, Math.abs(gy2 - gy1));
-  ctx.restore();
-
-  // pane mullions (light grid – verticals and one mid horizontal)
-  ctx.save();
-  ctx.globalAlpha = 0.22;
-  ctx.strokeStyle = shade(PALETTE.obstacleOutline, -20);
-  ctx.lineWidth = 1;
-
-  // verticals
-  for (let x = gx1 + 10; x < gx2 - 1; x += 12) {
-    ctx.beginPath();
-    ctx.moveTo(x, gy1 + (slope > 0 ? 0 : -1));
-    ctx.lineTo(x, gy2);
-    ctx.stroke();
-  }
-  // one horizontal mid-bar
-  const midY = (gy1 + gy2) * 0.5;
-  ctx.beginPath();
-  ctx.moveTo(gx1, midY);
-  ctx.lineTo(gx2, midY);
-  ctx.stroke();
-
-  ctx.restore();
-  ctx.restore(); // end clip
-
-  // tiny bolts along the curb (bottom edge)
-  ctx.save();
-  ctx.globalAlpha = 0.45;
-  ctx.fillStyle = shade(PALETTE.obstacleOutline, -18);
-  const boltCount = Math.max(2, Math.floor((o.w - boltPad * 2) / 16));
-  for (let i = 0; i < boltCount; i++) {
-    const t = boltCount === 1 ? 0.5 : i / (boltCount - 1);
-    const bx = left + boltPad + t * (o.w - boltPad * 2);
-    ctx.fillRect(bx - 1, yBot - 2, 2, 2);
-  }
-  ctx.restore();
-
-  // neon outline around the trapezoid (matches your style)
-  neonStrokePath(ctx, PALETTE.obstacleOutline, 2, 6, 0.55, () => {
-    _skylightPath(ctx, left, yBot, right, ridge);
-  });
-}
-
-function _skylightPath(ctx, left, yBot, right, ridge, inset = 8){
-  const w = Math.max(0, right - left);
-
-  // Keep the inward offset sane even for narrow skylights
-  const i = Math.max(2, Math.min(inset, Math.floor(w * 0.25)));
-
-  // Make sure ridge isn't below the bottom edge
-  const yR = Math.min(ridge, yBot - 1);
-
-  ctx.beginPath();
-  ctx.moveTo(left,       yBot);
-  ctx.lineTo(left  + i,  yR);
-  ctx.lineTo(right - i,  yR);
-  ctx.lineTo(right,      yBot);
-  ctx.closePath();
-}
-
-// ============
 function drawVentPipe(ctx, o) {
   const x = o.x, y = o.y, w = o.w, h = o.h;
   const deckY = y + h;
@@ -1171,7 +1034,6 @@ function drawVentPipe(ctx, o) {
     const sideGap = 1.2;                                   // tiny gap at ends
     const margin  = Math.max(3, Math.round(R * 0.22));     // keep away from rim a bit more
     const pitch   = Math.max(3, Math.round(R * (o.grillePitchMul || 0.34)));
-    // ↑ was ~0.18; 0.34 ≈ half as many lines. Raise to 0.38 for even fewer.
 
     const top    = yMid - openR + margin;
     const bottom = yMid + openR - margin;
@@ -1679,7 +1541,7 @@ function drawWaterTank(ctx, o){
     return; // done with poly_round
   }
 
-  // ---------- DRUM (horizontal on saddles) – unchanged from your version ----------
+  // ---------- DRUM (horizontal on saddles) ----------
   const sidePad = 6;
   const standH  = Math.max(10, Math.floor(h * 0.30));
   const bodyW   = Math.max(52, w - sidePad * 2);
@@ -1903,7 +1765,7 @@ function drawBillboard(ctx, o, t){
   const faceInnerW = faceW - frameInset*2;
   const faceInnerH = faceH - frameInset*2;
 
-  // outer frame (unchanged)
+  // outer frame
   const gFrame = ctx.createLinearGradient(faceX, faceY, faceX, faceY + faceH);
   gFrame.addColorStop(0, shade(PALETTE.obstacleFill, -8));
   gFrame.addColorStop(1, shade(PALETTE.obstacleFill, -22));
@@ -2033,7 +1895,7 @@ function drawBillboard(ctx, o, t){
     ctx.restore();
 
   } else {
-    // ------- classic (your original face) -------
+    // ------- classic -------
     const gFace = ctx.createLinearGradient(faceInnerX, faceInnerY, faceInnerX, faceInnerY + faceInnerH);
     gFace.addColorStop(0, "#16243f");
     gFace.addColorStop(0.55, "#0f1a33");
