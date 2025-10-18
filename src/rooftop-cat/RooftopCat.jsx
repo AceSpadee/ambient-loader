@@ -21,11 +21,10 @@ export default function RooftopCat() {
   const canvasRef = useRef(null);
   const effDprRef = useRef(1);
   const mobileZoomRef = useRef(1);
-  const rootRef = useRef(null);
+  const gameApiRef = useRef(null);
 
   // UI/state
   const [reduceMotion, setReduceMotion] = useState(() => localStorage.getItem("rc.rm")==="1");
-  const [score, setScore] = useState(0);
   const [best, setBest] = useState(() => Number(localStorage.getItem("rc.best") || 0));
   const [gameState, setGameState] = useState("ready"); // ready | playing | paused | dead
   const [cycleMode, setCycleMode] = useState(() => localStorage.getItem("rc.cycle") || "auto"); // auto|night|dawn|day
@@ -39,58 +38,11 @@ export default function RooftopCat() {
 
   // Live “best” mirror used by canvas HUD
   const bestRef = useRef(best);
-  useEffect(() => { bestRef.current = best; }, [best]);
 
   useEffect(() => { reduceMotionRef.current = reduceMotion; localStorage.setItem("rc.rm", reduceMotion? "1":"0"); }, [reduceMotion]);
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { cycleModeRef.current = cycleMode; localStorage.setItem("rc.cycle", cycleMode); }, [cycleMode]);
   useEffect(() => { weatherRef.current = weather; localStorage.setItem("rc.weather", weather); }, [weather]);
-
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    const block = (e) => e.preventDefault();
-    el.addEventListener("selectstart", block);
-    el.addEventListener("contextmenu", block);
-    return () => {
-      el.removeEventListener("selectstart", block);
-      el.removeEventListener("contextmenu", block);
-    };
-  }, []);
-
-  useEffect(() => {
-    // Make the page non-selectable / no callout while the game is mounted
-    const html = document.documentElement;
-    const body = document.body;
-    const prev = {
-      hUS: html.style.userSelect,
-      hWUS: html.style.webkitUserSelect,
-      hWTC: html.style.webkitTouchCallout,
-      bUS: body.style.userSelect,
-      bWUS: body.style.webkitUserSelect,
-      bWTC: body.style.webkitTouchCallout,
-    };
-
-    html.style.userSelect = "none";
-    html.style.webkitUserSelect = "none";
-    html.style.webkitTouchCallout = "none";
-    body.style.userSelect = "none";
-    body.style.webkitUserSelect = "none";
-    body.style.webkitTouchCallout = "none";
-
-    // Also kill the tap highlight glow
-    html.style.webkitTapHighlightColor = "transparent";
-    body.style.webkitTapHighlightColor = "transparent";
-
-    return () => {
-      html.style.userSelect = prev.hUS;
-      html.style.webkitUserSelect = prev.hWUS;
-      html.style.webkitTouchCallout = prev.hWTC;
-      body.style.userSelect = prev.bUS;
-      body.style.webkitUserSelect = prev.bWUS;
-      body.style.webkitTouchCallout = prev.bWTC;
-    };
-  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -219,7 +171,7 @@ export default function RooftopCat() {
     };
     const touchState = { duckId: null, jumpId: null };
 
-    const player = { x: 120, y: 0, vy: 0, w: 46, h: 36, duckH: 24, onGround: true, anim: 0, earFlickT: 2 + Math.random()*4 };
+    const player = { x: 120, y: 0, vy: 0, w: 46, h: 36, duckH: 24, onGround: true, earFlickT: 2 + Math.random()*4 };
 
     function calcGroundY() {
       const dpr = effDprRef.current;
@@ -287,14 +239,14 @@ export default function RooftopCat() {
 
     function resetRun(keepScore=false) {
       state.t = 0; state.speed = state.baseSpeed;
-      state.obstacles.length = 0; if(!keepScore){ state.score = 0; setScore(0); }
+      state.obstacles.length = 0; if(!keepScore){ state.score = 0; }
       state.shakeAmp = 0; state.shakeT = 0; state.shakeDur = 0;
       state.spawnTimer = 0.2; state.hitFxT = 0;
       state.groundY = calcGroundY();
       state.deckGaps = [];
       state.deckScrollX = 0;
 
-      player.x = 120; player.y = state.groundY - player.h; player.vy = 0; player.onGround = true; player.anim = 0;
+      player.x = 120; player.y = state.groundY - player.h; player.vy = 0; player.onGround = true;
 
       // scenery + weather
       const s = makeScenery(canvas, state.groundY, reduceMotionRef.current);
@@ -340,9 +292,37 @@ export default function RooftopCat() {
       }
     }
 
+    function onVisibilityLike() {
+      if ((document.hidden || document.visibilityState !== "visible")
+          && gameStateRef.current === "playing") {
+        setGameState("paused");
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityLike);
+    window.addEventListener("pagehide", onVisibilityLike);
+
     // first scene
     resetRun();
     syncGroundToCanvas();
+
+    gameApiRef.current = {
+      reset(keepScore = false) {
+        // Clear any held inputs so we don't start in a duck/jump
+        input.duck = false;
+        input.jumpHeld = false;
+        input.jumpBufferT = 0;
+        input.coyoteT = 0;
+        touchState.duckId = null;
+        touchState.jumpId = null;
+
+        // Go back to the ready screen (you can switch to "playing" if you prefer)
+        setGameState("ready");
+
+        // Rebuild the world
+        resetRun(keepScore);
+        syncGroundToCanvas();
+      }
+    };
 
     // ---------- input ----------
     function handleStartOrJump() {
@@ -473,7 +453,7 @@ export default function RooftopCat() {
     function step(){
       const now=performance.now(); const dt=Math.min(0.032,(now-state.last)/1000); state.last=now;
       if(gameStateRef.current==="playing") update(dt);
-      render(dt);
+      render();
       raf=requestAnimationFrame(step);
     }
 
@@ -746,7 +726,6 @@ export default function RooftopCat() {
       state.score += dt * state.speed * 0.02 * scoreMult;
 
       const s = Math.floor(state.score);
-      if (s !== score) setScore(s);
 
       // Live best update
       if (s > bestRef.current) {
@@ -791,17 +770,7 @@ export default function RooftopCat() {
       }
     }
 
-    function isCoarsePointer() {
-      if (typeof window === "undefined") return false;
-      const hasMM = typeof window.matchMedia === "function";
-      return (
-        (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
-        (hasMM && window.matchMedia("(pointer: coarse)").matches) ||
-        ("ontouchstart" in window)
-      );
-    }
-
-    function render(dt){
+    function render(){
       const dpr = effDprRef.current;
       const w = canvas.width / dpr, h = canvas.height / dpr;
 
@@ -975,7 +944,7 @@ export default function RooftopCat() {
       ctx.fillText(`score ${Math.floor(state.score)}`,16,28);
       ctx.fillText(`best ${bestRef.current}`,16,48);
 
-      const touch = isCoarsePointer();
+      const touch = isMobileUI;
 
       if (state.hintAlpha>0 && gameStateRef.current==="playing"){
         const hintText = "Hold left to duck • Tap/hold right to jump";
@@ -989,7 +958,15 @@ export default function RooftopCat() {
         const startText = "Tap/hold right to jump\nHold left to duck";
         centerText(ctx, w, h, startText, 18);
       } else if (gameStateRef.current === "dead") {
-        const deadText = touch ? "Ouch! Tap to retry" : "Ouch! Press Space/Click to retry";
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = "#060913";
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+
+        const finalScore = Math.floor(state.score);
+        const deadHint = touch ? "Tap to retry" : "Press Space/Click to retry";
+        const deadText = `Score: ${finalScore}\nBest: ${bestRef.current}\n${deadHint}`;
         centerText(ctx, w, h, deadText, 18);
       }
 
@@ -1029,10 +1006,12 @@ export default function RooftopCat() {
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointercancel", onPointerCancel);
       canvas.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("visibilitychange", onVisibilityLike);
+      window.removeEventListener("pagehide", onVisibilityLike);
     };
   }, []);
 
-  function handleReset(){ window.location.reload(); }
+  function handleReset(){ gameApiRef.current?.reset(false); }
   const prettyWeather = (w) => w[0].toUpperCase()+w.slice(1);
 
   // Direct Pause/Resume toggle (mirrors the P key)
@@ -1041,20 +1020,17 @@ export default function RooftopCat() {
   };
 
   return (
-    <div
-      ref={rootRef}
-      style={{ ...wrap, ...NO_SELECT }}
-      onContextMenu={(e) => e.preventDefault()}
-    >
+    <div style={wrap}>
       <canvas
         ref={canvasRef}
         style={{ display: "block", touchAction: "none", ...NO_SELECT }}
+        onContextMenu={(e) => e.preventDefault()}
       />
 
-      <div style={{ ...(isMobileUI ? hudMobile : hud), ...NO_SELECT }}>
+      <div style={{ ...(isMobileUI ? hudMobile : hud) }}>
         <button
           title="Toggle time of day (T)"
-          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
+          style={{ ...(isMobileUI ? chipMobile : chip) }}
           onClick={() =>
             window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }))
           }
@@ -1064,24 +1040,23 @@ export default function RooftopCat() {
 
         <button
           title="Cycle weather (R)"
-          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
+          style={{ ...(isMobileUI ? chipMobile : chip) }}
           onClick={() =>
             window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" }))
           }
         >
-          Weather: {prettyWeather(typeof window !== "undefined"
-            ? (localStorage.getItem("rc.weather") || "none") : "none")} (R)
+          Weather: {prettyWeather(weather)} (R)
         </button>
 
         <button
           title="Pause/Resume (P)"
-          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
+          style={{ ...(isMobileUI ? chipMobile : chip) }}
           onClick={handlePauseToggle}
         >
           {gameState === "paused" ? "Resume: Click/P" : "Pause: P"}
         </button>
 
-        <label style={{ ...(isMobileUI ? toggleLabelMobile : toggleLabel), ...NO_SELECT }}>
+        <label style={{ ...(isMobileUI ? toggleLabelMobile : toggleLabel) }}>
           <input
             type="checkbox"
             checked={reduceMotion}
@@ -1090,7 +1065,7 @@ export default function RooftopCat() {
           Reduce motion
         </label>
 
-        <button style={{ ...(isMobileUI ? btnMobile : btn), ...NO_SELECT }} onClick={handleReset}>
+        <button style={{ ...(isMobileUI ? btnMobile : btn) }} onClick={handleReset}>
           Reset
         </button>
       </div>
