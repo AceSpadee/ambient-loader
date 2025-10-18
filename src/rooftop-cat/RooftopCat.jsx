@@ -10,10 +10,18 @@ import { drawCat } from "./player.js";
 // Modular deck + under-deck wall
 import { drawDeck, initUnderDeck } from "./drawDeck.js";
 
+const NO_SELECT = {
+  userSelect: "none",
+  WebkitUserSelect: "none",
+  WebkitTouchCallout: "none",
+  WebkitTapHighlightColor: "transparent",
+};
+
 export default function RooftopCat() {
   const canvasRef = useRef(null);
   const effDprRef = useRef(1);
   const mobileZoomRef = useRef(1);
+  const rootRef = useRef(null);
 
   // UI/state
   const [reduceMotion, setReduceMotion] = useState(() => localStorage.getItem("rc.rm")==="1");
@@ -37,6 +45,18 @@ export default function RooftopCat() {
   useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
   useEffect(() => { cycleModeRef.current = cycleMode; localStorage.setItem("rc.cycle", cycleMode); }, [cycleMode]);
   useEffect(() => { weatherRef.current = weather; localStorage.setItem("rc.weather", weather); }, [weather]);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const block = (e) => e.preventDefault();
+    el.addEventListener("selectstart", block);
+    el.addEventListener("contextmenu", block);
+    return () => {
+      el.removeEventListener("selectstart", block);
+      el.removeEventListener("contextmenu", block);
+    };
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
