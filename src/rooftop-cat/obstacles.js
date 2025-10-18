@@ -47,12 +47,21 @@ export function lastSkylightRight(state){
 }
 
 // -------- spawner --------
-export function spawnObstacle(state, canvas){
-  const dpr = (window.devicePixelRatio || 1);
-  const w = canvas.width / dpr;
+export function spawnObstacle(state, canvas) {
+  if (!state || !canvas) return 1.2;
+
+  // Use the same world units as the renderer (works with mobile DPR cap).
+  const w = (state.playerCtx && Number.isFinite(state.playerCtx.canvasW))
+    ? state.playerCtx.canvasW
+    : canvas.width  / (window.devicePixelRatio || 1);
+
+  const h = (state.playerCtx && Number.isFinite(state.playerCtx.canvasH))
+    ? state.playerCtx.canvasH
+    : canvas.height / (window.devicePixelRatio || 1);
+
   const gy = state.groundY;
 
-  const spawnX = w + 40;          // where new obstacles are born
+  const spawnX = w + 40;
   const speed  = Math.max(120, state.speed);
   const MARGIN = 160;              // small visual safety pad (px)
 
