@@ -1082,17 +1082,19 @@ const chip={ background:"rgba(16,22,40,0.6)", color:"#cfe0ff", border:"1px solid
 
 const hudMobile = {
   position: "absolute",
-  bottom: 12,
+  top: 12,              // ⬅️ move to top
   right: 12,
-  top: "auto",
+  bottom: "auto",
   left: "auto",
   display: "flex",
   flexDirection: "column",
   alignItems: "flex-end",
   gap: 6,
   flexWrap: "nowrap",
-  maxWidth: "70vw",   // keep it narrow so it never reaches left edge
-  zIndex: 10
+  maxWidth: "70vw",     // keep it narrow so it never reaches left edge
+  zIndex: 10,
+  // Optional: add a little notch padding for iOS
+  paddingTop: "env(safe-area-inset-top, 0)"
 };
 
 const chipMobile = {
