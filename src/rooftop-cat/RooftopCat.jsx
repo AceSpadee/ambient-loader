@@ -59,6 +59,40 @@ export default function RooftopCat() {
   }, []);
 
   useEffect(() => {
+    // Make the page non-selectable / no callout while the game is mounted
+    const html = document.documentElement;
+    const body = document.body;
+    const prev = {
+      hUS: html.style.userSelect,
+      hWUS: html.style.webkitUserSelect,
+      hWTC: html.style.webkitTouchCallout,
+      bUS: body.style.userSelect,
+      bWUS: body.style.webkitUserSelect,
+      bWTC: body.style.webkitTouchCallout,
+    };
+
+    html.style.userSelect = "none";
+    html.style.webkitUserSelect = "none";
+    html.style.webkitTouchCallout = "none";
+    body.style.userSelect = "none";
+    body.style.webkitUserSelect = "none";
+    body.style.webkitTouchCallout = "none";
+
+    // Also kill the tap highlight glow
+    html.style.webkitTapHighlightColor = "transparent";
+    body.style.webkitTapHighlightColor = "transparent";
+
+    return () => {
+      html.style.userSelect = prev.hUS;
+      html.style.webkitUserSelect = prev.hWUS;
+      html.style.webkitTouchCallout = prev.hWTC;
+      body.style.userSelect = prev.bUS;
+      body.style.webkitUserSelect = prev.bWUS;
+      body.style.webkitTouchCallout = prev.bWTC;
+    };
+  }, []);
+
+  useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
 
@@ -1007,34 +1041,47 @@ export default function RooftopCat() {
   };
 
   return (
-    <div ref={rootRef} style={wrap} onContextMenu={(e) => e.preventDefault()}>
-      <canvas ref={canvasRef} style={{ display: "block", touchAction: "none", userSelect: "none" }} />
-      <div style={isMobileUI ? hudMobile : hud}>
+    <div
+      ref={rootRef}
+      style={{ ...wrap, ...NO_SELECT }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", touchAction: "none", ...NO_SELECT }}
+      />
+
+      <div style={{ ...(isMobileUI ? hudMobile : hud), ...NO_SELECT }}>
         <button
           title="Toggle time of day (T)"
-          style={isMobileUI ? chipMobile : chip}
-          onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }))}
+          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
+          onClick={() =>
+            window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }))
+          }
         >
           Time: T
         </button>
 
         <button
           title="Cycle weather (R)"
-          style={isMobileUI ? chipMobile : chip}
-          onClick={() => window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" }))}
+          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
+          onClick={() =>
+            window.dispatchEvent(new KeyboardEvent("keydown", { key: "r" }))
+          }
         >
-          Weather: {prettyWeather(typeof window !== "undefined" ? (localStorage.getItem("rc.weather") || "none") : "none")} (R)
+          Weather: {prettyWeather(typeof window !== "undefined"
+            ? (localStorage.getItem("rc.weather") || "none") : "none")} (R)
         </button>
 
         <button
           title="Pause/Resume (P)"
-          style={isMobileUI ? chipMobile : chip}
+          style={{ ...(isMobileUI ? chipMobile : chip), ...NO_SELECT }}
           onClick={handlePauseToggle}
         >
           {gameState === "paused" ? "Resume: Click/P" : "Pause: P"}
         </button>
 
-        <label style={isMobileUI ? toggleLabelMobile : toggleLabel}>
+        <label style={{ ...(isMobileUI ? toggleLabelMobile : toggleLabel), ...NO_SELECT }}>
           <input
             type="checkbox"
             checked={reduceMotion}
@@ -1043,7 +1090,9 @@ export default function RooftopCat() {
           Reduce motion
         </label>
 
-        <button style={isMobileUI ? btnMobile : btn} onClick={handleReset}>Reset</button>
+        <button style={{ ...(isMobileUI ? btnMobile : btn), ...NO_SELECT }} onClick={handleReset}>
+          Reset
+        </button>
       </div>
     </div>
   );
