@@ -1007,7 +1007,7 @@ export default function RooftopCat() {
   };
 
   return (
-    <div style={wrap}>
+    <div ref={rootRef} style={wrap} onContextMenu={(e) => e.preventDefault()}>
       <canvas ref={canvasRef} style={{ display: "block", touchAction: "none", userSelect: "none" }} />
       <div style={isMobileUI ? hudMobile : hud}>
         <button
