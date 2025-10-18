@@ -51,18 +51,17 @@ export default function RooftopCat() {
       );
     }
 
+    const MOBILE_EASE = 0.80;
+
     // ---------- sizing & DPR ----------
     function resize() {
-      // Width from the layout viewport
       const vw = Math.floor(window.innerWidth);
 
-      // Height: on mobile, take the larger of innerHeight and visualViewport.height
       const vvH = window.visualViewport?.height || 0;
       const ih  = window.innerHeight || 0;
       const onMobile = isMobileLike();
       const vh = Math.floor(onMobile ? Math.max(ih, vvH) : ih);
 
-      // Effective DPR (cap + quality knob)
       const rawDpr  = window.devicePixelRatio || 1;
       const dprCap  = onMobile ? 1.25 : 2.0;
       const quality = onMobile ? 0.80 : 1.00;
@@ -78,17 +77,18 @@ export default function RooftopCat() {
           : vwForZoom <= 480 ? 0.84
           : vwForZoom <= 560 ? 0.88
           : 0.92;
+
+        // <-- difficulty knob applied for everyone on mobile
+        z *= MOBILE_EASE;
       }
       mobileZoomRef.current = z;
 
-      // Canvas backing store + CSS size
       canvas.width  = Math.floor(vw * effDpr);
       canvas.height = Math.floor(vh * effDpr);
       canvas.style.width  = vw + "px";
       canvas.style.height = vh + "px";
       ctx.setTransform(effDpr, 0, 0, effDpr, 0, 0);
 
-      // Toggle compact HUD layout on mobile
       setIsMobileUI(onMobile);
     }
 
